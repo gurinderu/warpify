@@ -8,7 +8,14 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use warpify_proto::{Event, Request, State, HEARTBEAT_SECS, PIPE_NAME};
+use warpify_proto::{ClientId, Event, Request, State, HEARTBEAT_SECS, PIPE_NAME};
+
+mod bind;
+
+pub use bind::{
+    attach_session, bind_and_confirm, check_outside_zellij, confirmed, parse_known, pick_new,
+    wait_for_new_client, DEFAULT_SESSION,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
@@ -24,6 +31,14 @@ pub enum Error {
     Exit(String),
     /// No session was named and the process isn't running inside one.
     NoSession,
+    /// `attach` was run from a pane of a zellij session.
+    InsideSession(String),
+    /// A `--known` list wasn't comma-separated client ids.
+    BadKnown(String),
+    /// The bind went out but the client never reached its target.
+    NotMoved(ClientId),
+    /// No new client connected in time.
+    NoNewClient,
 }
 
 impl fmt::Display for Error {
@@ -41,6 +56,16 @@ impl fmt::Display for Error {
             Error::NoSession => f.write_str(
                 "not inside a zellij session — run from a pane of the session or pass --session <name>",
             ),
+            Error::InsideSession(name) => write!(
+                f,
+                "already inside zellij session \"{name}\" — use bind instead"
+            ),
+            Error::BadKnown(item) => write!(f, "bad client id {item:?} in --known"),
+            Error::NotMoved(client) => write!(
+                f,
+                "bind sent but client {client} didn't move — is it connected?"
+            ),
+            Error::NoNewClient => f.write_str("no new client connected to the session in time"),
         }
     }
 }
@@ -49,7 +74,7 @@ impl std::error::Error for Error {}
 
 /// Which zellij session to talk to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
+pub enum SessionTarget {
     /// The session this process runs in (`ZELLIJ_SESSION_NAME`).
     Current,
     /// The session with this name.
@@ -59,13 +84,13 @@ pub enum Target {
 /// Decides the session to address: the named one, else the current one if `env_session` (the value
 /// of `ZELLIJ_SESSION_NAME`) is set and non-empty. `Ok(None)` means "zellij picks the current one".
 fn resolve_session<'a>(
-    target: &'a Target,
+    target: &'a SessionTarget,
     env_session: Option<&str>,
 ) -> Result<Option<&'a str>, Error> {
     match target {
-        Target::Named(name) => Ok(Some(name)),
-        Target::Current if env_session.is_some_and(|s| !s.is_empty()) => Ok(None),
-        Target::Current => Err(Error::NoSession),
+        SessionTarget::Named(name) => Ok(Some(name)),
+        SessionTarget::Current if env_session.is_some_and(|s| !s.is_empty()) => Ok(None),
+        SessionTarget::Current => Err(Error::NoSession),
     }
 }
 
@@ -114,7 +139,7 @@ impl Changes {
 /// periods, if a reply can't be parsed, or if `zellij` fails to run or exits with a failure.
 pub fn stream(
     request: &Request,
-    target: &Target,
+    target: &SessionTarget,
     mut on_event: impl FnMut(&Event) -> bool,
 ) -> Result<(), Error> {
     let env_session = std::env::var("ZELLIJ_SESSION_NAME").ok();
@@ -174,6 +199,49 @@ pub fn stream(
     } else {
         Err(Error::Exit(status.to_string()))
     }
+}
+
+/// Sends `request` to the `target` session's pipe without waiting for a reply: runs `zellij pipe`
+/// to completion (a `Bind` gets no answer).
+///
+/// # Errors
+/// If there is no session to address, if `zellij` fails to run, or if it exits with a failure.
+pub fn send(request: &Request, target: &SessionTarget) -> Result<(), Error> {
+    let env_session = std::env::var("ZELLIJ_SESSION_NAME").ok();
+    let session = resolve_session(target, env_session.as_deref())?;
+    let payload = serde_json::to_string(request).map_err(|e| Error::Zellij(e.to_string()))?;
+    tracing::debug!(payload, "sending to zellij pipe");
+    let mut command = Command::new("zellij");
+    if let Some(name) = session {
+        command.args(["--session", name]);
+    }
+    let status = command
+        .args(["pipe", "--name", PIPE_NAME, "--", &payload])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .map_err(|e| Error::Zellij(format!("can't run zellij: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::Exit(status.to_string()))
+    }
+}
+
+/// Fetches one `State` from the `target` session.
+///
+/// # Errors
+/// As [`stream`].
+pub fn fetch_state(target: &SessionTarget) -> Result<State, Error> {
+    let mut state = None;
+    stream(&Request::State, target, |event| {
+        if let Event::State(s) = event {
+            state = Some(s.clone());
+            return false;
+        }
+        true
+    })?;
+    state.ok_or(Error::Closed)
 }
 
 /// Parses one reply line; blank lines carry nothing and give `None`.
@@ -240,14 +308,17 @@ mod tests {
 
     #[test]
     fn session_resolution() {
-        let named = Target::Named("w".into());
-        assert_eq!(resolve_session(&Target::Current, Some("s")), Ok(None));
+        let named = SessionTarget::Named("w".into());
         assert_eq!(
-            resolve_session(&Target::Current, None),
+            resolve_session(&SessionTarget::Current, Some("s")),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_session(&SessionTarget::Current, None),
             Err(Error::NoSession)
         );
         assert_eq!(
-            resolve_session(&Target::Current, Some("")),
+            resolve_session(&SessionTarget::Current, Some("")),
             Err(Error::NoSession)
         );
         assert_eq!(resolve_session(&named, None), Ok(Some("w")));
