@@ -22,6 +22,7 @@ register_plugin!(Warpify);
 
 impl ZellijPlugin for Warpify {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
+        warpify_telemetry::init("warpify=info");
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -65,6 +66,7 @@ impl ZellijPlugin for Warpify {
             return false;
         };
         let request = serde_json::from_str::<Request>(&payload);
+        tracing::debug!(pipe_id, ?request, "request received");
         let mine = self.session.handles(request.as_ref().ok());
         if !mine {
             return false;
@@ -79,8 +81,8 @@ impl ZellijPlugin for Warpify {
                 self.watchers.insert(pipe_id);
             }
             // Not implemented yet; design in graph @nick/warpify, node #9 (risk #10).
-            Ok(Request::Bind { .. }) => eprintln!("warpify: bind is not implemented yet"),
-            Err(err) => eprintln!("warpify: bad request {payload:?}: {err}"),
+            Ok(Request::Bind { .. }) => tracing::info!(pipe_id, "bind is not implemented yet"),
+            Err(err) => tracing::warn!(%err, payload, "bad request"),
         }
         false
     }
@@ -105,6 +107,7 @@ impl Warpify {
 
     fn send_to_watchers(&self, event: &WireEvent) {
         for pipe_id in &self.watchers {
+            tracing::debug!(pipe_id, ?event, "broadcast");
             send(pipe_id, event);
         }
     }
@@ -113,7 +116,7 @@ impl Warpify {
 fn send(pipe_id: &str, event: &WireEvent) {
     match serde_json::to_string(event) {
         Ok(line) => cli_pipe_output(pipe_id, &format!("{line}\n")),
-        Err(err) => eprintln!("warpify: can't encode {event:?}: {err}"),
+        Err(err) => tracing::error!(%err, ?event, "can't encode event"),
     }
 }
 

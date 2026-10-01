@@ -1,6 +1,6 @@
 //! `warpify` — talks to the warpify zellij plugin of the current session over `zellij pipe`.
 
-use std::fmt::Write as _;
+use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -11,6 +11,9 @@ use warpify_proto::{Event, Request, State};
 #[derive(Parser)]
 #[command(name = "warpify", about)]
 struct Cli {
+    /// log diagnostics to stderr: -v debug, -vv trace (`RUST_LOG` overrides)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
     #[command(subcommand)]
     command: Cmd,
 }
@@ -24,7 +27,16 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
-    match run(&Cli::parse().command.into()) {
+    let cli = Cli::parse();
+    let level = match cli.verbose {
+        0 => "warn",
+        1 => "debug",
+        _ => "trace",
+    };
+    warpify_telemetry::init(&format!(
+        "warpify={level},warpify_client={level},warpify_session={level}"
+    ));
+    match run(&cli.command.into()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("warpify: {err}");
@@ -42,34 +54,44 @@ impl From<Cmd> for Request {
     }
 }
 
-fn run(request: &Request) -> Result<(), warpify_client::Error> {
+fn run(request: &Request) -> Result<(), Box<dyn std::error::Error>> {
     let once = *request == Request::State;
     let mut changes = warpify_client::Changes::default();
+    let mut out = BufWriter::new(io::stdout().lock());
+    let mut write_err = None;
     warpify_client::stream(request, |event| {
         if let Event::State(state) = event {
             if changes.is_new(state) {
-                print!("{}", render(state));
+                // Flushed per state: `watch` must show each one at once.
+                if let Err(err) = render(state, &mut out).and_then(|()| out.flush()) {
+                    write_err = Some(err);
+                    return false;
+                }
             }
             return !once;
         }
         true
-    })
+    })?;
+    match write_err {
+        // The reader went away (e.g. `warpify watch | head`): a clean exit.
+        Some(err) if err.kind() != io::ErrorKind::BrokenPipe => Err(err.into()),
+        _ => Ok(()),
+    }
 }
 
-fn render(state: &State) -> String {
-    let mut out = String::new();
+fn render(state: &State, out: &mut impl Write) -> io::Result<()> {
     for tab in &state.tabs {
         let clients: Vec<String> = state.clients_on(tab.id).map(|c| c.id.to_string()).collect();
-        let _ = writeln!(
+        writeln!(
             out,
             "{:>3}  {:<24} id={:<4} clients=[{}]",
             tab.position,
             tab.name,
             tab.id,
             clients.join(",")
-        );
+        )?;
     }
-    out
+    Ok(())
 }
 
 #[cfg(test)]
@@ -93,6 +115,14 @@ mod tests {
             Cli::try_parse_from(["warpify", "watch"]).unwrap().command,
             Cmd::Watch
         ));
+    }
+
+    #[test]
+    fn verbose_counts() {
+        let cli = Cli::try_parse_from(["warpify", "-vv", "state"]).unwrap();
+        assert_eq!(cli.verbose, 2);
+        let cli = Cli::try_parse_from(["warpify", "watch", "-v"]).unwrap();
+        assert_eq!(cli.verbose, 1);
     }
 
     #[test]
@@ -129,7 +159,9 @@ mod tests {
                 },
             ],
         };
-        let out = render(&state);
+        let mut buf = Vec::new();
+        render(&state, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
         assert!(out.lines().next().unwrap().ends_with("clients=[]"));
         assert!(out.lines().nth(1).unwrap().ends_with("clients=[1,2]"));
     }

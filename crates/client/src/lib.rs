@@ -68,6 +68,7 @@ impl Changes {
 /// periods, if a reply can't be parsed, or if `zellij` fails to run or exits with a failure.
 pub fn stream(request: &Request, mut on_event: impl FnMut(&Event) -> bool) -> Result<(), Error> {
     let payload = serde_json::to_string(request).map_err(|e| Error::Zellij(e.to_string()))?;
+    tracing::debug!(payload, "spawning zellij pipe");
     let mut child = Command::new("zellij")
         .args(["pipe", "--name", PIPE_NAME, "--", &payload])
         .stdout(Stdio::piped())
@@ -85,6 +86,7 @@ pub fn stream(request: &Request, mut on_event: impl FnMut(&Event) -> bool) -> Re
     let outcome = loop {
         match rx.recv_timeout(silence) {
             Ok(Ok(event)) => {
+                tracing::debug!(?event, "event received; heartbeat timer reset");
                 got_state |= matches!(event, Event::State(_));
                 if !on_event(&event) {
                     break Ok(());
@@ -92,9 +94,10 @@ pub fn stream(request: &Request, mut on_event: impl FnMut(&Event) -> bool) -> Re
             }
             Ok(Err(err)) => break Err(err),
             Err(RecvTimeoutError::Timeout) => {
+                tracing::debug!(secs = silence.as_secs_f64(), "heartbeat timeout");
                 break Err(Error::Silent {
                     secs: silence.as_secs_f64(),
-                })
+                });
             }
             Err(RecvTimeoutError::Disconnected) => {
                 break if got_state {
@@ -128,6 +131,7 @@ fn parse_line(line: &str) -> Option<Result<Event, Error>> {
 /// Reads reply lines from the pipe and forwards them until it closes or the receiver is gone.
 fn read_events(stdout: ChildStdout, tx: &mpsc::Sender<Result<Event, Error>>) {
     for line in BufReader::new(stdout).lines() {
+        tracing::trace!(?line, "raw line");
         let item = match line {
             Ok(line) => match parse_line(&line) {
                 Some(item) => item,

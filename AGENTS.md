@@ -134,10 +134,11 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 ## Project structure
 - `flake.nix` / `.envrc` — devShell: Rust from `rust-toolchain.toml` via rust-overlay, plus the C linker.
 - Binary crates in `bin/` stay thin (wiring, args, I/O); logic lives in library crates in `crates/`, unit-tested on the host.
-- `Cargo.toml` — workspace; members `crates/proto`, `crates/session`, `crates/client`, `bin/plugin`, `bin/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
+- `Cargo.toml` — workspace; members `crates/proto`, `crates/session`, `crates/client`, `crates/telemetry`, `bin/plugin`, `bin/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
 - `crates/proto` — `warpify-proto`: wire types shared by plugin and CLI (`Request`, `Target`, `Event`, `State`); pipe name `warpify`, NDJSON replies, heartbeat on `watch`.
 - `crates/session` — `warpify-session`: the plugin's logic without zellij types, host-tested: `Snapshot` of tabs and clients taken from `TabUpdate` (non-mirrored sessions only), the wire `State` built from it, leader choice, which instance handles a request.
 - `crates/client` — `warpify-client`: the CLI side of the pipe: runs `zellij pipe`, reads NDJSON replies, liveness timeout and the "is it loaded?" errors.
+- `crates/telemetry` — `warpify-telemetry`: `init(default_filter)` installs the `tracing` subscriber on stderr (no timestamps, `RUST_LOG` overrides); no threads, builds for `wasm32-wasip1`.
 - `bin/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`. zellij runs one instance per client and fans each pipe message to all of them. Designed so that session-wide replies come from the lowest client's instance and per-client moves from that client's own instance (graph @nick/warpify, nodes #9, #10) — not yet observed in a live session.
 - `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI (clap, printing) over `warpify-client` (`state`, `watch`).
 
@@ -145,6 +146,7 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 - **Meaning lives in the graph, code references it**: a comment carrying rationale, discarded alternatives or integration design is a node; in code — "(graph @nick/warpify, node #N)", also for the discarded ("not cached: #N"). Mechanics — words in place. After referencing, check the node says it; diverged — fix the node.
 - **Clippy pedantic is on workspace-wide** (`[workspace.lints.clippy]`); every member crate carries `[lints] workspace = true`.
 - **Wire format is a contract**: any change to `warpify-proto` types changes plugin and CLI in the same change, and the serde-format tests in `crates/proto` assert the exact JSON.
+- **Output vs diagnostics**: program output (the CLI's answer) is plain writes to stdout; diagnostics go through `tracing` (stderr, `RUST_LOG`/`-v`), never `println!`/`eprintln!` — except the CLI's final error line.
 - **Gotchas don't live here**: a graph node on #2; here and in code — a reference.
 
 ## What to update when
