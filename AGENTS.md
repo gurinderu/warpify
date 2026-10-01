@@ -16,13 +16,13 @@ Slot, value, source. Source is `derived`, `agreed: <who>` or `<not agreed — ca
 | Gate | `scripts/gate.sh` — fmt check, clippy pedantic `-D warnings` (host + `wasm32-wasip1`), tests, release plugin build | agreed: Nick |
 | Consumers | the owner only, in their own zellij sessions; breakage shows up there | agreed: Nick |
 | Cost of breakage | low: the owner's own sessions; nothing shipped to others | agreed: Nick |
-| Reality | `REALITY.md` at the root — read on occasion (section «Reality» below); carriers `<not agreed — case №1>` | derived |
+| Reality | `REALITY.md` at the root — read on occasion (section «Reality» below); behaviour is checked by the owner by hand | agreed: Nick |
 | Layout | code map: «Project structure» section until a component gets its README — whoever first touches a component moves its map there; gotchas: graph nodes on #2 | derived |
 | Cross-project memory | personal realm `@nick/mind`; no global instructions file; never the memory directory | derived |
 | Language | talk to the user in Russian; everything written into the repo (code, comments, docs, commits, PRs) in English | agreed: Nick |
 | Feedback reflection | no | agreed: Nick |
 | Workflow-suite interop | none — no coercive workflow suite installed | derived |
-| Alignment | case №1 on #2 «Выравнивание warpify под контракт 18» — open slots are its `слот: …` lines; a new cover question is a word in that case, not a node | derived |
+| Alignment | empty — all slots agreed (case №1 on #2); a new cover question is a word in a case on #2, not a node | derived |
 
 ## Persistence rules
 State lives in the **repo** or in the **graph** — nowhere else. The harness's built-in memory (memory directory, conversation summaries, `/tmp`, machine-local files) is **forbidden entirely, not by category**. The work ledger is case lines; while no case exists — one file in the session temp dir (the `iskron` door's cross-cutting norms): a reason to open a case, it dies with the session — the only exception.
@@ -55,7 +55,7 @@ One line per rule; the full norm of case work and the ledger is in the `iskron` 
 - **Execution suites run execution** (plan, TDD, debugging, review); the graph carries memory and design. Execution decisions and risks go to the graph before the session ends.
 - **A claim you made is not a claim you accept.** Behavioural claims are closed by a cold `verifier`: brief — the claim, carrier and falsifier from `REALITY.md`; wait for the verdict. No such role — observe the carrier yourself, never the source.
 - **Hook merging**: entries from different suites in the hooks file coexist — add alongside, never overwrite others.
-- Hooks in `.claude/settings.json`: session start and memory-guard are wired, one line each; push and merge hooks arrive with the full arc.
+- Hooks in `.claude/settings.json` — session start, push, merge, memory-guard — are wired, one line each. Merge done on the GitHub web UI with trunk pulled by `git merge --ff-only` fires no hook — run the post-merge acts yourself.
 - **Keep this file honest.** The contract number is the first word of the `iskronify` skill description, present in every session's context: compare it with the stamp at the bottom, loading nothing. Higher than the stamp, or the sources moved after its date (`git log -1 --format=%cd -- <those files>`) — offer an `iskronify` run as the first move (launch is the human's or a case's word; silence — offer again; on watch without a window, after asking colleagues, the run is done per the «Who runs it» rule of `iskronify`: the `designer` role, without subagents or the role — yourself). A line here disagrees with the skill — say so aloud (in the case to the assigner, otherwise to the human): stamp lower — the skill is right; equal — a template defect, feedback to the skills-delivery steward (`feedback` skill).
 - **Keep the toolchain fresh**: updates are on by default, take them as the channel delivers. A channel without auto-update (unpacked copy) — check the version before the session or move.
 
@@ -97,7 +97,7 @@ Foreign API, SDK, CLI, protocol, schema: memory of them is indistinguishable fro
 - Source at a surface carries `(graph @nick/warpify, node #N)` — and you read that node before working.
 
 ## Reality — what a claim is checked against
-The carrier table is in `REALITY.md` at the root, read on occasion. Before saying a behaviour "works", flipping a mode or closing a question — read your claim class's row and observe its carrier; the row goes whole into the `verifier` and `reviewer` brief. The table isn't settled yet (case №1) — until it is, accept no behavioural claim without asking the owner what the carrier is. Ceiling is there too. Learned a carrier the table lacks — add the row then.
+The carrier table is in `REALITY.md` at the root, read on occasion. Before saying a behaviour "works", flipping a mode or closing a question — read your claim class's row and observe its carrier; the row goes whole into the `verifier` and `reviewer` brief. The first row is plugin/CLI behaviour in a live zellij session — observed by the owner by hand: hand them exact steps and wait for their report. Ceiling is there too. Learned a carrier the table lacks — add the row then.
 
 ## Graph ↔ repo: what lives where
 | Concern | Repo | Graph |

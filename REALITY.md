@@ -1,3 +1,12 @@
 # Reality — what a claim is checked against
+The graph models the work, the repo is part of its embodiment; this file names the third thing — what the work becomes when it runs, and how to look at it. A claim is decided by its canonical carrier, never the source meant to produce it; tests are a rung of evidence, not a carrier.
 
-Not settled yet: run the interview (say iskronify) before accepting any behavioural claim here.
+| Claim class | Canonical carrier | How to observe | Who can |
+|---|---|---|---|
+| Plugin/CLI behaviour (tabs and clients listed, client bound to a tab, `watch` stream) | the release `.wasm` loaded into a live zellij 0.45.1 session, driven by the built `warpify` binary | the agent hands over exact steps (build commands, how to load the plugin, which `warpify` calls to run, what to expect); the owner runs them and reports what they saw | user |
+| Wire format between CLI and plugin | `warpify-proto` serde output | `cargo test -p warpify-proto` — exact-JSON assertions | agent |
+| Code compiles and is lint-clean | build artefacts from `scripts/gate.sh` | `scripts/gate.sh` (on this machine under `nix shell nixpkgs#gcc -c …`) and the `ci` check on the PR | agent |
+
+**Ceiling**: the agent cannot observe live zellij behaviour itself — a behavioural claim stays unverified until the owner reports the observation; never close it from tests or source.
+
+**The table grows through use.** A session taught something the table lacks (an unnamed carrier, an observation reachable or not — then into *Ceiling*, a wrong command here) — write the row then, before closing the work that taught it. Only what observation needs goes here; dated measurements and history go to graph nodes.

@@ -23,6 +23,26 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); { printf %s \"$p\" | jq -e 'def a: \"(?:>&|\\\\\\\\.|\\\\x27[^\\\\x27]*\\\\x27|\\\\x22(?:[^\\\\x22\\\\\\\\]|\\\\\\\\.)*\\\\x22|[^;&|)\\n\\\\x27\\\\x22\\\\\\\\])*\"; def at(h; n): \"(?:^|[;&|(\\n] *)\" + h + \"(?=[ ;&|)\\n]|$)(?!\" + a + \" (?:\" + n + \")(?:[ ;&|)\\n]|$))\"; def ran(h; n; said): (.tool_input.command // \"\") as $c | (.tool_response | if type == \"object\" then \"\\(.stdout // \"\")\\n\\(.stderr // \"\")\" else tostring end) as $o | ($c | test(at(h; n) + a + \"[ \\n]*(?:&&|$)\")) or (($c | test(at(h; n))) and ($o | test(said))); ran(\"(?:env +)?(?:[A-Za-z_]+=[^ ]+ +)*git(?: -C [^ ]+)* push\"; \"-h|--help\"; \"To [^\\n]+(?:\\n [!=] [^\\n]*)*\\n [ *+-]\")' >/dev/null || { printf %s \"$p\" | jq -e 'def a: \"(?:>&|\\\\\\\\.|\\\\x27[^\\\\x27]*\\\\x27|\\\\x22(?:[^\\\\x22\\\\\\\\]|\\\\\\\\.)*\\\\x22|[^;&|)\\n\\\\x27\\\\x22\\\\\\\\])*\"; (.tool_input.command // \"\") | (test(\"^(?:\" + a + \"[;&|(\\n] *)*(?:env +)?(?:[A-Za-z_]+=[^ ]+ +)*git(?: -C [^ ]+)* push(?=[ ;&|)\\n]|$)(?!\" + a + \" (?:-h|--help)(?:[ ;&|)\\n]|$))\" + a + \" (?:-q|--quiet)(?=[ ;&|)\\n]|$)\") and (test(\"<<\") | not))' >/dev/null && h=$(git rev-parse HEAD 2>/dev/null) && [ -n \"$h\" ] && [ \"$h\" = \"$(git rev-parse \"@{push}\" 2>/dev/null)\" ] && case \"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\" in main|master) false;; *) true;; esac; }; } && echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", \"additionalContext\": \"Push shipped nothing — merge ships. Now: self-check the branch diff, vocabulary pass on the PR text, cold stage review (AGENTS.md: «Stage self-check», «Cold stage review»).\"}}' || true"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -e 'def a: \"(?:>&|\\\\\\\\.|\\\\x27[^\\\\x27]*\\\\x27|\\\\x22(?:[^\\\\x22\\\\\\\\]|\\\\\\\\.)*\\\\x22|[^;&|)\\n\\\\x27\\\\x22\\\\\\\\])*\"; def at(h; n): \"(?:^|[;&|(\\n] *)\" + h + \"(?=[ ;&|)\\n]|$)(?!\" + a + \" (?:\" + n + \")(?:[ ;&|)\\n]|$))\"; def ran(h; n; said): (.tool_input.command // \"\") as $c | (.tool_response | if type == \"object\" then \"\\(.stdout // \"\")\\n\\(.stderr // \"\")\" else tostring end) as $o | ($c | test(at(h; n) + a + \"[ \\n]*(?:&&|$)\")) or (($c | test(at(h; n))) and ($o | test(said))); ran(\"gh pr merge\"; \"-h|--help|--auto|--disable-auto\"; \"(?:Merged|Squashed and merged|Rebased and merged) pull request\") or ((.tool_input.command // \"\") | test(at(\"(?:env +)?(?:[A-Za-z_]+=[^ ]+ +)*git(?: -C [^ ]+)* (?:checkout|switch)\"; \"-h|--help\") + \" (?:main|master)(?=[ ;&|)\\n]|$)(?:\" + a + \"(?:&&|;|\\n))+ *(?:env +)?(?:[A-Za-z_]+=[^ ]+ +)*git(?: -C [^ ]+)* pull(?=[ ;&|)\\n]|$)\"))' >/dev/null && echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", \"additionalContext\": \"Merge landed — run the post-merge acts of AGENTS.md «Session lifecycle» → «Merge → graph»: weave, advance the map, flip modes, close by axis, reconcile, vocabulary pass; then «Branch discipline».\"}}' || true"
+          }
+        ]
+      }
     ]
   }
 }
