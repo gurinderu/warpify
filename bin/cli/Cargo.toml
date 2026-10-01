@@ -1,0 +1,18 @@
+[package]
+name = "warpify-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "warpify"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+warpify-client.workspace = true
+warpify-proto.workspace = true
+warpify-telemetry.workspace = true
+
+[lints]
+workspace = true

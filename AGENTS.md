@@ -52,6 +52,7 @@ One line per rule; the full norm of case work and the ledger is in the `iskron` 
   - **Reconcile** (`reconcile`): nodes against code, code against graph, the discarded recorded and referenceable; remainder as vimarshas.
   - **Vocabulary pass**: borrowed words (ticket, backlog, sprint, epic, story, done, blocker, committed) in landing text and nodes — name them to the human and ask what the project calls them; don't substitute yourself.
 - **Design isn't ready until decisions, risks and lifecycle are in the graph** — whatever skill elicited it; another suite's design/spec file is taken in the same session. Without the owner: decisions and risks now, the transformation with its telos for confirmation.
+- **The main session orchestrates; subagents do the work.** It holds the dialogue with the owner, decisions, writing the design into the graph, briefs and acceptance. Implementation of a settled design goes to `worker` (self-contained brief: design nodes, files, gate, return contract); graph-writing design to `designer`; reconnaissance to `reader`/`searcher`; checks to cold `reviewer`/`verifier`. Writing code in the main session only when the owner asks for it.
 - **Execution suites run execution** (plan, TDD, debugging, review); the graph carries memory and design. Execution decisions and risks go to the graph before the session ends.
 - **A claim you made is not a claim you accept.** Behavioural claims are closed by a cold `verifier`: brief — the claim, carrier and falsifier from `REALITY.md`; wait for the verdict. No such role — observe the carrier yourself, never the source.
 - **Hook merging**: entries from different suites in the hooks file coexist — add alongside, never overwrite others.
@@ -120,27 +121,32 @@ The carrier table is in `REALITY.md` at the root, read on occasion. Before sayin
 | What | Command |
 |---|---|
 | gate (the only call before push; CI runs it) | `scripts/gate.sh` |
-| build (default members: proto, cli) | `cargo build` |
+| build (default members: all but the plugin) | `cargo build` |
 | build plugin | `cargo build -p warpify-plugin --target wasm32-wasip1 --release` |
 | test | `cargo test` |
 | lint | `cargo clippy --workspace --exclude warpify-plugin --all-targets -- -D warnings` (plugin: `-p warpify-plugin --target wasm32-wasip1`) |
 | format | `cargo fmt --all` |
 
-The workspace does not resolve yet: `crates/cli` has no `Cargo.toml` and `crates/plugin` has no `src/main.rs`, so the gate stays red until both exist.
+The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `target/debug/warpify` (or `release`).
 - Toolchain and C linker come from the flake devShell: `nix develop` (or direnv with `.envrc`), then cargo / `scripts/gate.sh` as usual; outside it native builds fail for lack of `cc` (graph @nick/warpify, node #4).
 - Pre-commit hook lives in `.githooks/`; enable per clone with `git config core.hooksPath .githooks`.
 
 ## Project structure
 - `flake.nix` / `.envrc` — devShell: Rust from `rust-toolchain.toml` via rust-overlay, plus the C linker.
-- `Cargo.toml` — workspace; members `crates/proto`, `crates/plugin`, `crates/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
+- Binary crates in `bin/` stay thin (wiring, args, I/O); logic lives in library crates in `crates/`, unit-tested on the host.
+- `Cargo.toml` — workspace; members `crates/proto`, `crates/session`, `crates/client`, `crates/telemetry`, `bin/plugin`, `bin/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
 - `crates/proto` — `warpify-proto`: wire types shared by plugin and CLI (`Request`, `Target`, `Event`, `State`); pipe name `warpify`, NDJSON replies, heartbeat on `watch`.
-- `crates/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`.
-- `crates/cli` — the `warpify` CLI (no manifest or sources yet).
+- `crates/session` — `warpify-session`: the plugin's logic without zellij types, host-tested: `Snapshot` of tabs and clients taken from `TabUpdate` (non-mirrored sessions only), the wire `State` built from it, leader choice, which instance handles a request.
+- `crates/client` — `warpify-client`: the CLI side of the pipe: runs `zellij pipe`, reads NDJSON replies, liveness timeout and the "is it loaded?" errors.
+- `crates/telemetry` — `warpify-telemetry`: `init(default_filter)` installs the `tracing` subscriber on stderr (no timestamps, `RUST_LOG` overrides); no threads, builds for `wasm32-wasip1`.
+- `bin/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`. zellij runs one instance per client and fans each pipe message to all of them. Designed so that session-wide replies come from the lowest client's instance and per-client moves from that client's own instance (graph @nick/warpify, nodes #9, #10) — not yet observed in a live session.
+- `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI (clap, printing) over `warpify-client` (`state`, `watch`; global `-s/--session <name>` targets a named session, default the current one).
 
 ## Code conventions
 - **Meaning lives in the graph, code references it**: a comment carrying rationale, discarded alternatives or integration design is a node; in code — "(graph @nick/warpify, node #N)", also for the discarded ("not cached: #N"). Mechanics — words in place. After referencing, check the node says it; diverged — fix the node.
 - **Clippy pedantic is on workspace-wide** (`[workspace.lints.clippy]`); every member crate carries `[lints] workspace = true`.
 - **Wire format is a contract**: any change to `warpify-proto` types changes plugin and CLI in the same change, and the serde-format tests in `crates/proto` assert the exact JSON.
+- **Output vs diagnostics**: program output (the CLI's answer) is plain writes to stdout; diagnostics go through `tracing` (stderr, `RUST_LOG`/`-v`), never `println!`/`eprintln!` — except the CLI's final error line.
 - **Gotchas don't live here**: a graph node on #2; here and in code — a reference.
 
 ## What to update when

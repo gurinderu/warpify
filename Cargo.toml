@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/plugin", "crates/cli"]
-default-members = ["crates/proto", "crates/cli"]
+members = ["crates/proto", "crates/session", "crates/client", "crates/telemetry", "bin/plugin", "bin/cli"]
+default-members = ["crates/proto", "crates/session", "crates/client", "crates/telemetry", "bin/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,9 +9,15 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
+warpify-client = { path = "crates/client" }
 warpify-proto = { path = "crates/proto" }
+warpify-session = { path = "crates/session" }
+warpify-telemetry = { path = "crates/telemetry" }
 
 [profile.release]
 opt-level = "s"
