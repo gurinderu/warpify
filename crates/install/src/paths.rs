@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use directories::{BaseDirs, ProjectDirs};
 
+use crate::plan::PLUGIN_FILE;
 use crate::{Error, Result};
 
 /// The environment variables zellij itself reads for its config; passed in so resolution stays
@@ -97,7 +98,7 @@ impl Paths {
                 .join("config.kdl")
         };
         Ok(Self {
-            wasm: dirs.warpify_data.join("warpify.wasm"),
+            wasm: dirs.warpify_data.join(PLUGIN_FILE),
             config,
             permissions: dirs.zellij_cache.join("permissions.kdl"),
         })
@@ -121,7 +122,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let p = Paths::resolve(&EnvVars::default(), &dirs(t.path())).unwrap();
         assert_eq!(p.config, t.path().join("home/.config/zellij/config.kdl"));
-        assert_eq!(p.wasm, t.path().join("data/warpify/warpify.wasm"));
+        assert_eq!(p.wasm, t.path().join("data/warpify/warpify-zellij.wasm"));
         assert_eq!(p.permissions, t.path().join("cache/zellij/permissions.kdl"));
     }
 

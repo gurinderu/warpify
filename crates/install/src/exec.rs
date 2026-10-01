@@ -200,7 +200,7 @@ mod tests {
     fn sandbox() -> (tempfile::TempDir, Paths) {
         let t = tempfile::tempdir().unwrap();
         let p = Paths {
-            wasm: t.path().join("data/warpify/warpify.wasm"),
+            wasm: t.path().join("data/warpify").join(crate::PLUGIN_FILE),
             config: t.path().join("cfg/config.kdl"),
             permissions: t.path().join("cache/zellij/permissions.kdl"),
         };
@@ -209,9 +209,12 @@ mod tests {
 
     fn fake(wasm: &[u8], sha: &str) -> Fake {
         let mut m = HashMap::new();
-        m.insert(crate::release_url("1.2.3", "warpify.wasm"), wasm.to_vec());
         m.insert(
-            crate::release_url("1.2.3", "warpify.wasm.sha256"),
+            crate::release_url("1.2.3", crate::PLUGIN_FILE),
+            wasm.to_vec(),
+        );
+        m.insert(
+            crate::release_url("1.2.3", &format!("{}.sha256", crate::PLUGIN_FILE)),
             sha.as_bytes().to_vec(),
         );
         Fake(m, RefCell::default())
@@ -232,7 +235,7 @@ mod tests {
             .to_string()
             .contains("mismatch"));
         assert!(!p.wasm.exists());
-        let good = fake(b"abc", &format!("{ABC}  warpify.wasm\n"));
+        let good = fake(b"abc", &format!("{ABC}  warpify-zellij.wasm\n"));
         execute(&plan, &good).unwrap();
         assert_eq!(std::fs::read(&p.wasm).unwrap(), b"abc");
     }

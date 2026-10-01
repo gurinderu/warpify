@@ -124,11 +124,11 @@ The carrier table is in `REALITY.md` at the root, read on occasion. Before sayin
 | build (default members: all but the plugin) | `cargo build` |
 | build plugin | `cargo build -p warpify-plugin --target wasm32-wasip1 --release` |
 | test | `cargo test` |
-| release | merge the release PR that release-please keeps open on main (conventional commits drive the version; the release gets warpify.wasm + .sha256) |
+| release | merge the release PR that release-please keeps open on main (conventional commits drive the version; the release gets warpify-zellij.wasm + .sha256) |
 | lint | `cargo clippy --workspace --exclude warpify-plugin --all-targets -- -D warnings` (plugin: `-p warpify-plugin --target wasm32-wasip1`) |
 | format | `cargo fmt --all` |
 
-The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `target/debug/warpify` (or `release`).
+The plugin lands at `target/wasm32-wasip1/release/warpify-zellij.wasm`; the CLI at `target/debug/warpify` (or `release`).
 - Toolchain and C linker come from the flake devShell: `nix develop` (or direnv with `.envrc`), then cargo / `scripts/gate.sh` as usual; outside it native builds fail for lack of `cc` (graph @nick/warpify, node #4).
 - Pre-commit hook lives in `.githooks/`; enable per clone with `git config core.hooksPath .githooks`.
 
@@ -141,8 +141,8 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 - `crates/client` — `warpify-client`: the CLI side of the pipe: runs `zellij pipe`, reads NDJSON replies, liveness timeout and the "is it loaded?" errors; fire-and-forget `send`; `bind` confirmation and `attach`'s wait for the new client (`bind.rs`; node #16).
 - `crates/telemetry` — `warpify-telemetry`: `init(default_filter)` installs the `tracing` subscriber on stderr (no timestamps, `RUST_LOG` overrides); no threads, builds for `wasm32-wasip1`.
 - `crates/install` — `warpify-install`: `warpify install|uninstall zellij` logic, host-tested: paths, sha256-verified download (`ureq`), a pure `Plan` then execution, format-preserving `kdl` edits of zellij's `config.kdl` (`load_plugins`) and `permissions.kdl` (grants from `warpify_proto::PERMISSIONS`), "manual" snippet for nix-store/read-only configs (graph @nick/warpify, node #17).
-- `.github/workflows/release-please.yml`, `release-please-config.json`, `.release-please-manifest.json` — release-please opens and updates the release PR on `main`; merging it tags `vX.Y.Z`, and the workflow's `assets` job builds the wasm plugin and attaches `warpify.wasm` and `warpify.wasm.sha256` to the GitHub release.
-- `bin/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`. zellij runs one instance per client and fans each pipe message to all of them. Designed so that session-wide replies come from the lowest client's instance and per-client moves from that client's own instance (graph @nick/warpify, nodes #9, #10) — not yet observed in a live session.
+- `.github/workflows/release-please.yml`, `release-please-config.json`, `.release-please-manifest.json` — release-please opens and updates the release PR on `main`; merging it tags `vX.Y.Z`, and the workflow's `assets` job builds the wasm plugin and attaches `warpify-zellij.wasm` and `warpify-zellij.wasm.sha256` to the GitHub release.
+- `bin/plugin` — `warpify-plugin`, bin `warpify-zellij` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`. zellij runs one instance per client and fans each pipe message to all of them. Designed so that session-wide replies come from the lowest client's instance and per-client moves from that client's own instance (graph @nick/warpify, nodes #9, #10) — not yet observed in a live session.
 - `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI (clap, printing) over `warpify-client` (`state`, `watch`, `bind`, `attach`, `install`/`uninstall`, hidden `__bind-new` helper; global `-s/--session <name>` targets a named session, default the current one — `attach` defaults to `warpify`).
 
 ## Code conventions

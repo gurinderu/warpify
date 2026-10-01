@@ -18,7 +18,7 @@ pub use paths::{Dirs, EnvVars, Paths};
 pub use permissions::{merge_permissions, remove_permissions};
 pub use plan::{
     plan_install, plan_uninstall, probe_config, release_url, Action, ConfigAccess, Plan, Seen,
-    Source,
+    Source, PLUGIN_FILE,
 };
 
 use std::fmt;

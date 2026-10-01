@@ -9,6 +9,9 @@ use crate::{Error, Paths, Result};
 const REPO: &str = "https://github.com/gurinderu/warpify";
 const NIX_STORE: &str = "/nix/store";
 
+/// The plugin artifact: the release asset (its checksum is `<this>.sha256`) and the installed file.
+pub const PLUGIN_FILE: &str = "warpify-zellij.wasm";
+
 /// URL of a release asset for the CLI's own version.
 #[must_use]
 pub fn release_url(version: &str, file: &str) -> String {
@@ -175,8 +178,8 @@ fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<A
 pub fn plan_install(paths: &Paths, source: &Source, access: &ConfigAccess) -> Result<Plan> {
     let wasm = match source {
         Source::Release { version } => Action::FetchWasm {
-            url: release_url(version, "warpify.wasm"),
-            sha_url: release_url(version, "warpify.wasm.sha256"),
+            url: release_url(version, PLUGIN_FILE),
+            sha_url: release_url(version, &format!("{PLUGIN_FILE}.sha256")),
             dest: paths.wasm.clone(),
         },
         Source::Local(from) => Action::CopyWasm {
@@ -222,7 +225,7 @@ pub fn plan_uninstall(paths: &Paths, access: &ConfigAccess) -> Result<Plan> {
     Ok(Plan { actions })
 }
 
-fn entry_may_be_in(seen: &Seen, entry: &str) -> bool {
+pub(crate) fn entry_may_be_in(seen: &Seen, entry: &str) -> bool {
     match seen {
         Seen::Missing => false,
         Seen::Text(text) => lists_entry(text, entry),
@@ -264,7 +267,7 @@ mod tests {
 
     fn paths() -> Paths {
         Paths {
-            wasm: "/d/warpify/warpify.wasm".into(),
+            wasm: "/d/warpify/warpify-zellij.wasm".into(),
             config: "/c/config.kdl".into(),
             permissions: "/k/permissions.kdl".into(),
         }
@@ -273,8 +276,8 @@ mod tests {
     #[test]
     fn release_urls_follow_the_version() {
         assert_eq!(
-            release_url("0.1.0", "warpify.wasm.sha256"),
-            "https://github.com/gurinderu/warpify/releases/download/v0.1.0/warpify.wasm.sha256"
+            release_url("0.1.0", "warpify-zellij.wasm.sha256"),
+            "https://github.com/gurinderu/warpify/releases/download/v0.1.0/warpify-zellij.wasm.sha256"
         );
     }
 
@@ -307,7 +310,7 @@ mod tests {
             plan.actions[2],
             Action::Manual {
                 file: "/c/config.kdl".into(),
-                entry: "file:/d/warpify/warpify.wasm".into(),
+                entry: "file:/d/warpify/warpify-zellij.wasm".into(),
                 why: "nix".into(),
                 adding: true,
                 seen: Seen::Missing,
@@ -320,6 +323,24 @@ mod tests {
         let plan = plan_uninstall(&paths(), &ConfigAccess::Editable).unwrap();
         assert!(matches!(plan.actions[0], Action::RemoveLoadPlugin { .. }));
         assert!(matches!(plan.actions[2], Action::RemoveWasm { .. }));
+    }
+
+    #[test]
+    fn the_artifact_names_come_from_one_const() {
+        assert_eq!(PLUGIN_FILE, "warpify-zellij.wasm");
+        let rel = Source::Release {
+            version: "1.2.3".into(),
+        };
+        let plan = plan_install(&paths(), &rel, &ConfigAccess::Editable).unwrap();
+        let Action::FetchWasm { url, sha_url, dest } = &plan.actions[0] else {
+            panic!("{plan:?}")
+        };
+        assert!(url.ends_with("/v1.2.3/warpify-zellij.wasm"), "{url}");
+        assert!(
+            sha_url.ends_with("/v1.2.3/warpify-zellij.wasm.sha256"),
+            "{sha_url}"
+        );
+        assert!(dest.ends_with(PLUGIN_FILE));
     }
 
     #[test]
