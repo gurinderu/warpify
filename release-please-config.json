@@ -12,7 +12,8 @@
           "path": "Cargo.toml",
           "jsonpath": "$.workspace.package.version"
         }
-      ]
+      ],
+      "bump-minor-pre-major": true
     }
   }
 }
