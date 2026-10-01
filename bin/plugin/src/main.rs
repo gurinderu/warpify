@@ -1,6 +1,7 @@
 //! The warpify zellij plugin: answers `warpify-proto` requests arriving on the `warpify` pipe.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
@@ -27,16 +28,26 @@ struct Warpify {
 
 register_plugin!(Warpify);
 
+/// What `load` requests: the names in `warpify_proto::PERMISSIONS`, parsed by zellij's own
+/// `PermissionType::from_str`. The installer pre-grants the same names; an unknown one is logged
+/// and skipped.
+fn requested_permissions() -> Vec<PermissionType> {
+    warpify_proto::PERMISSIONS
+        .iter()
+        .filter_map(|name| {
+            let parsed = PermissionType::from_str(name);
+            if parsed.is_err() {
+                tracing::error!(name, "unknown zellij permission in PERMISSIONS, skipping");
+            }
+            parsed.ok()
+        })
+        .collect()
+}
+
 impl ZellijPlugin for Warpify {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
         warpify_telemetry::init("warpify=info");
-        request_permission(&[
-            PermissionType::ReadApplicationState,
-            PermissionType::ChangeApplicationState,
-            PermissionType::ReadCliPipes,
-            // To tell the other instances a client has left (graph @nick/warpify, node #9).
-            PermissionType::MessageAndLaunchOtherPlugins,
-        ]);
+        request_permission(&requested_permissions());
         subscribe(&[
             EventType::TabUpdate,
             // Reaches frozen instances too; reports 0 connected clients once the last client

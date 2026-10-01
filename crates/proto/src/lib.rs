@@ -8,6 +8,18 @@ use serde::{Deserialize, Serialize};
 /// Pipe name the plugin listens on.
 pub const PIPE_NAME: &str = "warpify";
 
+/// The zellij permissions the plugin requests, by the names zellij uses (`PermissionType`
+/// variants in zellij-utils `plugin_permission.proto`). The plugin builds its
+/// `request_permission` list from this and the installer pre-grants exactly these in zellij's
+/// permission cache (graph @nick/warpify, node #17).
+pub const PERMISSIONS: &[&str] = &[
+    "ReadApplicationState",
+    "ChangeApplicationState",
+    "ReadCliPipes",
+    // To tell the other instances a client has left (graph @nick/warpify, node #9).
+    "MessageAndLaunchOtherPlugins",
+];
+
 /// Seconds between heartbeats on a `watch` stream.
 pub const HEARTBEAT_SECS: f64 = 5.0;
 
@@ -103,7 +115,19 @@ pub fn base_tab_name(name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
+
+    #[test]
+    fn every_permission_name_is_one_zellij_knows() {
+        for name in PERMISSIONS {
+            assert!(
+                zellij_utils::data::PermissionType::from_str(name).is_ok(),
+                "zellij 0.45.1 has no permission named {name}"
+            );
+        }
+    }
 
     #[test]
     fn base_tab_name_strips_the_exit_suffix() {

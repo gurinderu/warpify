@@ -12,6 +12,7 @@ path = "src/main.rs"
 clap.workspace = true
 tracing.workspace = true
 warpify-client.workspace = true
+warpify-install.workspace = true
 warpify-proto.workspace = true
 warpify-telemetry.workspace = true
 
