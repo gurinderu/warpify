@@ -160,7 +160,7 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 
 ## Git workflow
 - **Conventional commits** (`feat:`/`fix:`/`chore:`/`refactor:`/`docs:`/`test:`); branches `feat/…`, `fix/…`, `chore/…`; PR titles in the same format.
-- **No co-author trailer** unless the user asked.
+- **No AI attribution** — no co-author trailer, no "Generated with …" line in commits, PR titles or bodies.
 - **Gate — one call**: `scripts/gate.sh`; call it by name, never assemble the steps by hand; CI (`.github/workflows/ci.yml`) calls the same script.
 - **Pre-commit hook** (`.githooks/pre-commit`) runs fmt check and host clippy; not enabled — gate before push.
 - **Branch doesn't live without a PR**: pushed a branch — open a PR in the same move (draft if unfinished). Forge: GitHub, CLI `gh` (`gh pr checks <n> --watch`).
