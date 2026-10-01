@@ -7,17 +7,28 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use clap::{Parser, Subcommand};
 use warpify_proto::{Event, Request, State, HEARTBEAT_SECS, PIPE_NAME};
 
-const USAGE: &str = "usage: warpify <state|watch>
+/// Talks to the warpify zellij plugin of the current session over `zellij pipe`. The plugin must
+/// already be loaded in the session (zellij config or layout).
+#[derive(Parser)]
+#[command(name = "warpify", about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Cmd,
+}
 
-  state   print the session's tabs and the clients on each
-  watch   print the state on every change (heartbeats are silent)
-
-The warpify plugin must already be loaded in the session (zellij config or layout).";
+#[derive(Subcommand)]
+enum Cmd {
+    /// print the session's tabs and the clients on each
+    State,
+    /// print the state on every change (heartbeats are silent)
+    Watch,
+}
 
 fn main() -> ExitCode {
-    match run(std::env::args().skip(1).collect()) {
+    match run(&Cli::parse().command.into()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("warpify: {err}");
@@ -26,40 +37,18 @@ fn main() -> ExitCode {
     }
 }
 
-/// What the command line asks for.
-#[derive(Debug, PartialEq)]
-enum Cmd {
-    Help,
-    Send(Request),
-}
-
-fn parse_args(args: Vec<String>) -> Result<Cmd, String> {
-    let mut command = None;
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => return Ok(Cmd::Help),
-            _ if command.is_none() => command = Some(arg),
-            _ => return Err(format!("unexpected argument {arg:?}\n\n{USAGE}")),
+impl From<Cmd> for Request {
+    fn from(command: Cmd) -> Self {
+        match command {
+            Cmd::State => Request::State,
+            Cmd::Watch => Request::Watch,
         }
-    }
-    match command.as_deref() {
-        Some("state") => Ok(Cmd::Send(Request::State)),
-        Some("watch") => Ok(Cmd::Send(Request::Watch)),
-        Some(other) => Err(format!("unknown command {other:?}\n\n{USAGE}")),
-        None => Err(USAGE.to_owned()),
     }
 }
 
-fn run(args: Vec<String>) -> Result<(), String> {
-    let request = match parse_args(args)? {
-        Cmd::Help => {
-            println!("{USAGE}");
-            return Ok(());
-        }
-        Cmd::Send(request) => request,
-    };
-    let once = request == Request::State;
-    stream(&request, |event| {
+fn run(request: &Request) -> Result<(), String> {
+    let once = *request == Request::State;
+    stream(request, |event| {
         if let Event::State(state) = event {
             print!("{}", render(state));
             return !once;
@@ -157,22 +146,30 @@ fn render(state: &State) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use warpify_proto::{Client, Tab};
 
-    fn args(a: &[&str]) -> Vec<String> {
-        a.iter().map(|s| (*s).to_owned()).collect()
+    #[test]
+    fn cli_is_well_formed() {
+        Cli::command().debug_assert();
     }
 
     #[test]
     fn parse_accepts_state_and_watch() {
-        assert_eq!(parse_args(args(&["state"])), Ok(Cmd::Send(Request::State)));
-        assert_eq!(parse_args(args(&["watch"])), Ok(Cmd::Send(Request::Watch)));
+        assert!(matches!(
+            Cli::try_parse_from(["warpify", "state"]).unwrap().command,
+            Cmd::State
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["warpify", "watch"]).unwrap().command,
+            Cmd::Watch
+        ));
     }
 
     #[test]
     fn parse_rejects_plugin_option() {
-        assert!(parse_args(args(&["--plugin", "file:x.wasm", "state"])).is_err());
-        assert!(parse_args(args(&["state", "--plugin"])).is_err());
+        assert!(Cli::try_parse_from(["warpify", "--plugin", "x", "state"]).is_err());
+        assert!(Cli::try_parse_from(["warpify", "state", "--plugin"]).is_err());
     }
 
     #[test]

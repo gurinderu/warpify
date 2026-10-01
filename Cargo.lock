@@ -2171,6 +2171,7 @@ dependencies = [
 name = "warpify-cli"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "serde_json",
  "warpify-proto",
 ]

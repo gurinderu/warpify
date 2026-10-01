@@ -9,6 +9,7 @@ name = "warpify"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
 serde_json.workspace = true
 warpify-proto.workspace = true
 
