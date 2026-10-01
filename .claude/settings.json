@@ -1,0 +1,28 @@
+{
+  "enabledPlugins": {
+    "iskron@iskron": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"Read the «Start» section of the iskron door (skill iskron) before acting. Repo addresses: realm @nick/warpify, focus contour #2, agent role #3, owner role #1 (AGENTS.md cover). Standing only on watch (вахта, start, a seat address, a frame), via one iskron_stand; start <graph> <role> <case №N> enters that case; a subagent stands on its own satellite bridge (iskron_stand with satellite_of). Open cover slots: case №1.\"}}' || true"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // \"\"' | grep -Eq '\\.claude/projects/.*/memory/' && { echo 'BLOCKED: local agent memory is forbidden entirely, not by category (AGENTS.md, Persistence rules). Route the fact: repo conventions / code facts → AGENTS.md; project state, this repo'\\''s servers and dated duties → the project realm @nick/warpify; a user-scoped fact no project owns → the personal realm @nick/mind (minding skill). This dir stays frozen at its prohibition stub.' >&2; exit 2; } || exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

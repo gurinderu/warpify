@@ -1,0 +1,17 @@
+[package]
+name = "warpify-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "warpify"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+warpify-proto.workspace = true
+zellij-tile = "=0.45.1"
+
+[lints]
+workspace = true
