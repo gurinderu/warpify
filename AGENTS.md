@@ -121,7 +121,7 @@ The carrier table is in `REALITY.md` at the root, read on occasion. Before sayin
 | What | Command |
 |---|---|
 | gate (the only call before push; CI runs it) | `scripts/gate.sh` |
-| build (default members: proto, cli) | `cargo build` |
+| build (default members: all but the plugin) | `cargo build` |
 | build plugin | `cargo build -p warpify-plugin --target wasm32-wasip1 --release` |
 | test | `cargo test` |
 | lint | `cargo clippy --workspace --exclude warpify-plugin --all-targets -- -D warnings` (plugin: `-p warpify-plugin --target wasm32-wasip1`) |
@@ -133,11 +133,13 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 
 ## Project structure
 - `flake.nix` / `.envrc` — devShell: Rust from `rust-toolchain.toml` via rust-overlay, plus the C linker.
-- Binary crates live in `bin/`, library crates in `crates/`.
-- `Cargo.toml` — workspace; members `crates/proto`, `bin/plugin`, `bin/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
+- Binary crates in `bin/` stay thin (wiring, args, I/O); logic lives in library crates in `crates/`, unit-tested on the host.
+- `Cargo.toml` — workspace; members `crates/proto`, `crates/session`, `crates/client`, `bin/plugin`, `bin/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
 - `crates/proto` — `warpify-proto`: wire types shared by plugin and CLI (`Request`, `Target`, `Event`, `State`); pipe name `warpify`, NDJSON replies, heartbeat on `watch`.
+- `crates/session` — `warpify-session`: the plugin's logic without zellij types, host-tested: `Snapshot` of tabs, panes and clients, the wire `State` built from it, leader choice, which instance handles a request.
+- `crates/client` — `warpify-client`: the CLI side of the pipe: runs `zellij pipe`, reads NDJSON replies, liveness timeout and the "is it loaded?" errors.
 - `bin/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`. zellij runs one instance per client and fans each pipe message to all of them. Designed so that session-wide replies come from the lowest client's instance and per-client moves from that client's own instance (graph @nick/warpify, nodes #9, #10) — not yet observed in a live session.
-- `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI; runs `zellij pipe --name warpify` and reads NDJSON replies (`state`, `watch`).
+- `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI (clap, printing) over `warpify-client` (`state`, `watch`).
 
 ## Code conventions
 - **Meaning lives in the graph, code references it**: a comment carrying rationale, discarded alternatives or integration design is a node; in code — "(graph @nick/warpify, node #N)", also for the discarded ("not cached: #N"). Mechanics — words in place. After referencing, check the node says it; diverged — fix the node.

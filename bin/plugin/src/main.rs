@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use warpify_proto::{Client, Event as WireEvent, Request, State, Tab, HEARTBEAT_SECS, PIPE_NAME};
+use warpify_proto::{Event as WireEvent, Request, State, HEARTBEAT_SECS, PIPE_NAME};
+use warpify_session::{ClientSnapshot, PaneRef, PaneSnapshot, Snapshot, TabSnapshot};
 use zellij_tile::prelude::*;
 
 /// zellij runs one instance of this plugin per connected client and fans every pipe message out
@@ -11,9 +12,7 @@ use zellij_tile::prelude::*;
 struct Warpify {
     /// The client this instance belongs to.
     own_client: ClientId,
-    tabs: Vec<TabInfo>,
-    panes: PaneManifest,
-    clients: Vec<ClientInfo>,
+    session: Snapshot,
     /// CLI pipes held open by `watch`, by pipe id. zellij gives no signal when a CLI watcher goes
     /// away, so ids of dead pipes stay here (graph @nick/warpify, node #11).
     watchers: BTreeSet<String>,
@@ -45,15 +44,15 @@ impl ZellijPlugin for Warpify {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::TabUpdate(tabs) => {
-                self.tabs = tabs;
+                self.session.tabs = tabs.iter().map(tab_snapshot).collect();
                 list_clients();
             }
             Event::PaneUpdate(panes) => {
-                self.panes = panes;
+                self.session.panes = panes.panes.iter().map(pane_snapshot).collect();
                 list_clients();
             }
             Event::ListClients(clients) => {
-                self.clients = clients;
+                self.session.clients = clients.iter().map(client_snapshot).collect();
                 self.broadcast_if_changed();
             }
             Event::PermissionRequestResult(_) => list_clients(),
@@ -81,12 +80,7 @@ impl ZellijPlugin for Warpify {
             return false;
         };
         let request = serde_json::from_str::<Request>(&payload);
-        // A bind is the named client's own instance's job; anything else is answered once, by the
-        // leader, or the CLI would get a copy per client.
-        let mine = match &request {
-            Ok(Request::Bind { client, .. }) => *client == self.own_client,
-            _ => self.is_leader(),
-        };
+        let mine = self.session.handles(self.own_client, request.as_ref().ok());
         if !mine {
             return false;
         }
@@ -108,56 +102,8 @@ impl ZellijPlugin for Warpify {
 }
 
 impl Warpify {
-    /// The instance of the lowest connected client speaks for the session. With no client list
-    /// yet every instance does: a duplicate reply beats a CLI left hanging.
-    fn is_leader(&self) -> bool {
-        self.clients
-            .iter()
-            .map(|c| c.client_id)
-            .min()
-            .is_none_or(|leader| leader == self.own_client)
-    }
-
     fn state(&self) -> State {
-        let tabs = self
-            .tabs
-            .iter()
-            .map(|t| Tab {
-                id: t.tab_id,
-                position: t.position,
-                name: t.name.clone(),
-            })
-            .collect();
-        let clients = self
-            .clients
-            .iter()
-            .filter_map(|c| {
-                Some(Client {
-                    id: c.client_id,
-                    tab: self.tab_of_pane(&c.pane_id)?,
-                    managed: false,
-                })
-            })
-            .collect();
-        State { tabs, clients }
-    }
-
-    /// The stable id of the tab holding `pane`; the manifest is keyed by tab position.
-    fn tab_of_pane(&self, pane: &PaneId) -> Option<usize> {
-        let (id, is_plugin) = match *pane {
-            PaneId::Terminal(id) => (id, false),
-            PaneId::Plugin(id) => (id, true),
-        };
-        let position = self.panes.panes.iter().find_map(|(position, panes)| {
-            panes
-                .iter()
-                .any(|p| p.id == id && p.is_plugin == is_plugin)
-                .then_some(*position)
-        })?;
-        self.tabs
-            .iter()
-            .find(|t| t.position == position)
-            .map(|t| t.tab_id)
+        self.session.state()
     }
 
     fn broadcast_if_changed(&mut self) {
@@ -183,5 +129,43 @@ fn send(pipe_id: &str, event: &WireEvent) {
     match serde_json::to_string(event) {
         Ok(line) => cli_pipe_output(pipe_id, &format!("{line}\n")),
         Err(err) => eprintln!("warpify: can't encode {event:?}: {err}"),
+    }
+}
+
+fn pane_ref(id: PaneId) -> PaneRef {
+    match id {
+        PaneId::Terminal(id) => PaneRef::Terminal(id),
+        PaneId::Plugin(id) => PaneRef::Plugin(id),
+    }
+}
+
+fn tab_snapshot(tab: &TabInfo) -> TabSnapshot {
+    TabSnapshot {
+        id: tab.tab_id,
+        position: tab.position,
+        name: tab.name.clone(),
+    }
+}
+
+fn pane_snapshot((position, panes): (&usize, &Vec<PaneInfo>)) -> PaneSnapshot {
+    PaneSnapshot {
+        tab_position: *position,
+        panes: panes
+            .iter()
+            .map(|p| {
+                if p.is_plugin {
+                    PaneRef::Plugin(p.id)
+                } else {
+                    PaneRef::Terminal(p.id)
+                }
+            })
+            .collect(),
+    }
+}
+
+fn client_snapshot(client: &ClientInfo) -> ClientSnapshot {
+    ClientSnapshot {
+        id: client.client_id,
+        pane: pane_ref(client.pane_id),
     }
 }

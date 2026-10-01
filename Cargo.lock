@@ -2172,6 +2172,14 @@ name = "warpify-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "warpify-client",
+ "warpify-proto",
+]
+
+[[package]]
+name = "warpify-client"
+version = "0.1.0"
+dependencies = [
  "serde_json",
  "warpify-proto",
 ]
@@ -2182,6 +2190,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "warpify-proto",
+ "warpify-session",
  "zellij-tile",
 ]
 
@@ -2191,6 +2200,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "warpify-session"
+version = "0.1.0"
+dependencies = [
+ "warpify-proto",
 ]
 
 [[package]]

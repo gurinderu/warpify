@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "bin/plugin", "bin/cli"]
-default-members = ["crates/proto", "bin/cli"]
+members = ["crates/proto", "crates/session", "crates/client", "bin/plugin", "bin/cli"]
+default-members = ["crates/proto", "crates/session", "crates/client", "bin/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +12,9 @@ license = "MIT"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+warpify-client = { path = "crates/client" }
 warpify-proto = { path = "crates/proto" }
+warpify-session = { path = "crates/session" }
 
 [profile.release]
 opt-level = "s"

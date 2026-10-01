@@ -1,14 +1,10 @@
 //! `warpify` — talks to the warpify zellij plugin of the current session over `zellij pipe`.
 
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader};
-use std::process::{ChildStdout, Command, ExitCode, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
-use std::time::Duration;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use warpify_proto::{Event, Request, State, HEARTBEAT_SECS, PIPE_NAME};
+use warpify_proto::{Event, Request, State};
 
 /// Talks to the warpify zellij plugin of the current session over `zellij pipe`. The plugin must
 /// already be loaded in the session (zellij config or layout).
@@ -46,85 +42,15 @@ impl From<Cmd> for Request {
     }
 }
 
-fn run(request: &Request) -> Result<(), String> {
+fn run(request: &Request) -> Result<(), warpify_client::Error> {
     let once = *request == Request::State;
-    stream(request, |event| {
+    warpify_client::stream(request, |event| {
         if let Event::State(state) = event {
             print!("{}", render(state));
             return !once;
         }
         true
     })
-}
-
-/// Sends `request` down the pipe and feeds each reply (heartbeats included) to `on_event` until it
-/// returns `false` or the pipe closes. Errors if no State arrives before that, or if nothing at
-/// all arrives for three heartbeat periods.
-fn stream(request: &Request, mut on_event: impl FnMut(&Event) -> bool) -> Result<(), String> {
-    let payload = serde_json::to_string(request).map_err(|e| e.to_string())?;
-    let mut child = Command::new("zellij")
-        .args(["pipe", "--name", PIPE_NAME, "--", &payload])
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("can't run zellij: {e}"))?;
-    let stdout = child.stdout.take().ok_or("zellij gave no stdout")?;
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || read_events(stdout, &tx));
-
-    let silence = Duration::from_secs_f64(3.0 * HEARTBEAT_SECS);
-    let mut got_state = false;
-    let outcome = loop {
-        match rx.recv_timeout(silence) {
-            Ok(Ok(event)) => {
-                got_state |= matches!(event, Event::State(_));
-                if !on_event(&event) {
-                    break Ok(());
-                }
-            }
-            Ok(Err(err)) => break Err(err),
-            Err(RecvTimeoutError::Timeout) => break Err(not_loaded(silence.as_secs_f64())),
-            Err(RecvTimeoutError::Disconnected) => {
-                break if got_state {
-                    Ok(())
-                } else {
-                    Err(not_loaded_closed())
-                };
-            }
-        }
-    };
-    if outcome.is_err() || !got_state {
-        let _ = child.kill();
-    }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    outcome?;
-    if status.success() || status.code().is_none() {
-        Ok(())
-    } else {
-        Err(format!("zellij pipe exited with {status}"))
-    }
-}
-
-fn not_loaded(secs: f64) -> String {
-    format!("no reply from the warpify plugin for {secs} s — is it loaded in this session?")
-}
-
-fn not_loaded_closed() -> String {
-    "the pipe closed before the warpify plugin sent a state — is it loaded in this session?"
-        .to_owned()
-}
-
-/// Reads reply lines from the pipe and forwards them until it closes or the receiver is gone.
-fn read_events(stdout: ChildStdout, tx: &mpsc::Sender<Result<Event, String>>) {
-    for line in BufReader::new(stdout).lines() {
-        let item = match line {
-            Ok(line) if line.trim().is_empty() => continue,
-            Ok(line) => serde_json::from_str(&line).map_err(|e| format!("bad reply {line:?}: {e}")),
-            Err(e) => Err(e.to_string()),
-        };
-        if tx.send(item).is_err() {
-            return;
-        }
-    }
 }
 
 fn render(state: &State) -> String {
