@@ -28,8 +28,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
-      - run: rustup toolchain install
-      - run: cargo build -p warpify-plugin --target wasm32-wasip1 --release
+      - uses: cachix/install-nix-action@v31
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+      # Put the devShell's cargo/rustc on PATH so rust-cache keys on the right rustc.
+      - run: dirname "$(nix develop -c which cargo)" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - run: nix develop -c cargo build -p warpify-plugin --target wasm32-wasip1 --release
       - run: |
           cp target/wasm32-wasip1/release/warpify.wasm warpify.wasm
           sha256sum warpify.wasm > warpify.wasm.sha256
