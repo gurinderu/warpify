@@ -93,7 +93,7 @@ impl TargetArgs {
 fn target_flags(target: &Target) -> Vec<String> {
     match target {
         Target::Id(id) => vec!["--tab-id".into(), id.to_string()],
-        Target::Name(name) => vec!["--name".into(), name.clone()],
+        Target::Name(name) => vec![format!("--name={name}")],
         Target::New(None) => vec!["--new".into()],
         Target::New(Some(name)) => vec![format!("--new={name}")],
     }
@@ -170,7 +170,7 @@ fn bind(session: &SessionTarget, client: ClientId, target: &Target, pin: bool) -
     let tab = warpify_client::bind_and_confirm(session, client, target, pin)?;
     writeln!(
         io::stdout(),
-        "client {client} → tab \"{}\" (id {})",
+        "client {client} is on tab \"{}\" (id {})",
         tab.name,
         tab.id
     )?;
@@ -238,7 +238,7 @@ fn bind_new_inner(
     tracing::debug!(client, "binding the new client");
     let tab = warpify_client::bind_and_confirm(&session, client, target, pin)?;
     Ok(format!(
-        "client {client} bound to tab \"{}\" (id {})",
+        "client {client} is on tab \"{}\" (id {})",
         tab.name, tab.id
     ))
 }
@@ -363,12 +363,16 @@ mod tests {
     }
 
     #[test]
-    fn helper_flags_round_trip() {
+    fn helper_flags_round_trip_even_for_names_starting_with_a_dash() {
         for target in [
             Target::Id(3),
             Target::Name("a b".into()),
+            Target::Name("-x".into()),
+            Target::Name("--new".into()),
             Target::New(None),
             Target::New(Some("n".into())),
+            Target::New(Some("-n".into())),
+            Target::New(Some("--pin".into())),
         ] {
             let mut argv = vec!["warpify".to_owned(), "__bind-new".to_owned()];
             argv.push("--known=1,2".into());

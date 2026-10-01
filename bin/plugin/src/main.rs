@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
 use warpify_session::{
-    departed, on_tabs, plan_bind, tab_index, BindStep, Binding, Correction, Internal, Snapshot,
-    TabSnapshot, INTERNAL_PIPE,
+    departed, on_tabs, plan_bind, tab_index, BindStep, Correction, Internal, Snapshot, TabSnapshot,
+    INTERNAL_PIPE,
 };
 use zellij_tile::prelude::*;
 
@@ -39,6 +39,9 @@ impl ZellijPlugin for Warpify {
         ]);
         subscribe(&[
             EventType::TabUpdate,
+            // Reaches frozen instances too; reports 0 connected clients once the last client
+            // has left (zellij-server `screen.rs` `remove_client`).
+            EventType::SessionUpdate,
             EventType::Timer,
             EventType::PermissionRequestResult,
         ]);
@@ -50,10 +53,23 @@ impl ZellijPlugin for Warpify {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::TabUpdate(tabs) => {
-                self.session.tabs = tabs.iter().map(tab_snapshot).collect();
+                self.session
+                    .apply_tabs(tabs.iter().map(tab_snapshot).collect());
                 self.announce_departures();
                 self.correct_binding();
                 self.broadcast_if_changed();
+            }
+            Event::SessionUpdate(sessions, _) => {
+                let empty = sessions
+                    .iter()
+                    .any(|s| s.is_current_session && s.connected_clients == 0);
+                if empty && self.session.connected {
+                    tracing::info!(
+                        client = self.session.own_client,
+                        "no clients connected, freezing"
+                    );
+                    self.freeze();
+                }
             }
             Event::Timer(_) => {
                 self.send_to_watchers(&WireEvent::Heartbeat);
@@ -135,35 +151,47 @@ impl Warpify {
         };
         match Internal::decode(payload) {
             Ok(Internal::Forget { client }) => {
-                if client == self.session.own_client && self.session.binding.is_some() {
-                    tracing::info!(client, "forgetting binding of a departed client");
+                if client == self.session.own_client && self.session.connected {
+                    tracing::info!(client, "client departed, freezing");
+                    self.freeze();
                 }
-                self.session.forget(client);
             }
             Err(err) => tracing::warn!(%err, payload, "bad internal message"),
         }
     }
 
+    /// Go silent: the client is gone, so its binding and the watchers held here are dead.
+    fn freeze(&mut self) {
+        self.session.freeze();
+        self.watchers.clear();
+        self.last_sent = None;
+    }
+
     fn bind(&mut self, target: &warpify_proto::Target, pin: bool) {
         let client = self.session.own_client;
-        let tab = match plan_bind(target, &self.session.tabs) {
+        let step = plan_bind(target, &self.session.tabs);
+        let tab = match &step {
             BindStep::GoTo(id) => {
-                go_to_tab_id(&self.session.tabs, id);
-                Some(id)
+                go_to_tab_id(&self.session.tabs, *id);
+                Some(*id)
             }
-            BindStep::FocusOrCreate(name) => focus_or_create_tab(&name),
+            BindStep::FocusOrCreate(name) => focus_or_create_tab(name),
             BindStep::CreateNew(name) => new_tab(name.as_deref(), None),
             BindStep::Fail(reason) => {
                 tracing::warn!(client, reason, "bind failed");
                 return;
             }
         };
-        let Some(tab) = tab else {
-            tracing::warn!(client, ?target, "zellij returned no tab for bind");
-            return;
-        };
-        self.session.binding = Some(Binding::new(tab, pin));
-        tracing::info!(client, tab, pin, "bind executed");
+        self.session.finish_bind(&step, pin, tab);
+        if let Some(tab) = tab {
+            tracing::info!(client, tab, pin, "bind executed");
+        } else {
+            tracing::warn!(
+                client,
+                ?target,
+                "zellij returned no tab for bind, waiting for the tab update"
+            );
+        }
     }
 
     /// Undo a drift from the binding, once the binding is in force (graph @nick/warpify, node #9).

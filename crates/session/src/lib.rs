@@ -22,13 +22,71 @@ pub struct TabSnapshot {
 ///
 /// Requires a non-mirrored session: in a mirrored one zellij reports no other clients, so only
 /// the instance's own client would show up.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// The client this instance belongs to.
     pub own_client: ClientId,
     pub tabs: Vec<TabSnapshot>,
     /// Set while this instance's client is bound (graph @nick/warpify, node #9).
     pub binding: Option<Binding>,
+    /// A bind whose tab zellij hasn't reported yet (its action timed out): adopted by a later
+    /// tab update once the own client is seen on the tab.
+    pub pending: Option<PendingBind>,
+    /// False once the instance is frozen: its client has left, zellij keeps the instance loaded
+    /// and still pipes every message to it, but no tab update reaches it until a client takes
+    /// the id again. A frozen instance stays silent (graph @nick/warpify, node #9, risk #12).
+    pub connected: bool,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            own_client: ClientId::default(),
+            tabs: Vec::new(),
+            binding: None,
+            pending: None,
+            connected: true,
+        }
+    }
+}
+
+/// What a bind that returned no tab id was after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingKind {
+    /// The tab with this name, focused or created.
+    FocusOrCreate(String),
+    /// A new tab: the one the client lands on that wasn't there when the bind started.
+    CreateNew,
+}
+
+/// A bind waiting for its tab to show up in a tab update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingBind {
+    pub kind: PendingKind,
+    pub pin: bool,
+    /// Tabs known when the bind started, so an old active tab isn't taken for the new one.
+    known: Vec<TabId>,
+}
+
+impl PendingBind {
+    #[must_use]
+    pub fn new(kind: PendingKind, pin: bool, tabs: &[TabSnapshot]) -> Self {
+        Self {
+            kind,
+            pin,
+            known: tabs.iter().map(|t| t.id).collect(),
+        }
+    }
+
+    /// The tab this bind ended up on, if the own client is on it in `tabs`.
+    #[must_use]
+    pub fn resolve(&self, tabs: &[TabSnapshot]) -> Option<TabId> {
+        let active = tabs.iter().find(|t| t.active)?;
+        match &self.kind {
+            PendingKind::FocusOrCreate(name) => (active.name == *name).then_some(active.id),
+            PendingKind::CreateNew => (!self.known.contains(&active.id)).then_some(active.id),
+        }
+    }
 }
 
 /// A client held on a tab by its own plugin instance.
@@ -98,6 +156,9 @@ pub fn plan_bind(target: &Target, tabs: &[TabSnapshot]) -> BindStep {
 /// What a bound instance must do after a tab update; `None` when nothing is wrong.
 #[must_use]
 pub fn on_tabs(binding: Option<Binding>, snapshot: &Snapshot) -> Option<Correction> {
+    if !snapshot.connected {
+        return None;
+    }
     let binding = binding?.seen_in(&snapshot.tabs);
     if !binding.seen {
         return None;
@@ -129,8 +190,8 @@ pub const INTERNAL_PIPE: &str = "warpify-internal";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "msg", rename_all = "snake_case")]
 pub enum Internal {
-    /// `client` has left the session: the instance that belongs to it drops its binding, since
-    /// zellij keeps that instance and hands it to the next client with the same id (graph
+    /// `client` has left the session: the instance that belongs to it freezes, since zellij
+    /// keeps that instance and hands it to the next client with the same id (graph
     /// @nick/warpify, node #9, risk #12).
     Forget { client: ClientId },
 }
@@ -198,29 +259,70 @@ impl Snapshot {
         self.clients().iter().map(|c| c.id).collect()
     }
 
-    /// Apply `Internal::Forget`: only the instance of that client drops its binding.
+    /// Apply `Internal::Forget`: only the instance of that client freezes.
     pub fn forget(&mut self, client: ClientId) {
         if client == self.own_client {
-            self.binding = None;
+            self.freeze();
         }
+    }
+
+    /// The client is gone: drop the binding and go silent until a tab update says a client holds
+    /// this id again.
+    pub fn freeze(&mut self) {
+        self.connected = false;
+        self.binding = None;
+        self.pending = None;
+    }
+
+    /// A tab update arrived, so a client holds this id: un-freeze (a fresh start, the binding
+    /// stays cleared) and adopt a pending bind whose tab the client is now on.
+    pub fn apply_tabs(&mut self, tabs: Vec<TabSnapshot>) {
+        self.tabs = tabs;
+        self.connected = true;
+        if let Some(tab) = self.pending.as_ref().and_then(|p| p.resolve(&self.tabs)) {
+            let pin = self.pending.take().is_some_and(|p| p.pin);
+            self.binding = Some(Binding::new(tab, pin));
+        }
+    }
+
+    /// Record the outcome of a bind step: the tab zellij returned is the binding, no tab (the
+    /// action timed out) leaves a pending bind for a later tab update. `Fail` holds nothing.
+    pub fn finish_bind(&mut self, step: &BindStep, pin: bool, tab: Option<TabId>) {
+        self.binding = None;
+        self.pending = None;
+        if let Some(tab) = tab {
+            self.binding = Some(Binding::new(tab, pin));
+            return;
+        }
+        let kind = match step {
+            BindStep::FocusOrCreate(name) => PendingKind::FocusOrCreate(name.clone()),
+            BindStep::CreateNew(_) => PendingKind::CreateNew,
+            BindStep::GoTo(_) | BindStep::Fail(_) => return,
+        };
+        self.pending = Some(PendingBind::new(kind, pin, &self.tabs));
     }
 
     /// The instance of the lowest connected client speaks for the session. With no client known
     /// yet every instance does: a duplicate reply beats a CLI left hanging.
     #[must_use]
     pub fn is_leader(&self) -> bool {
-        self.clients()
-            .iter()
-            .map(|c| c.id)
-            .min()
-            .is_none_or(|leader| leader == self.own_client)
+        self.connected
+            && self
+                .clients()
+                .iter()
+                .map(|c| c.id)
+                .min()
+                .is_none_or(|leader| leader == self.own_client)
     }
 
     /// Whether this instance handles `request` (`None`: it didn't parse). A bind is the named
     /// client's own instance's job; anything else is answered once, by the leader, or the CLI
-    /// would get a copy per client.
+    /// would get a copy per client. A frozen instance handles nothing.
     #[must_use]
     pub fn handles(&self, request: Option<&Request>) -> bool {
+        if !self.connected {
+            return false;
+        }
         match request {
             Some(Request::Bind { client, .. }) => *client == self.own_client,
             _ => self.is_leader(),
@@ -252,7 +354,7 @@ mod tests {
         Snapshot {
             own_client,
             tabs: vec![tab(0, 0, true, others)],
-            binding: None,
+            ..Snapshot::default()
         }
     }
 
@@ -295,7 +397,7 @@ mod tests {
         let snap = Snapshot {
             own_client: 3,
             tabs: vec![],
-            binding: None,
+            ..Snapshot::default()
         };
         assert_eq!(snap.state().clients, vec![]);
         assert!(snap.is_leader());
@@ -348,6 +450,7 @@ mod tests {
                 own_client: 1,
                 tabs,
                 binding,
+                ..Snapshot::default()
             },
         )
     }
@@ -436,7 +539,7 @@ mod tests {
             let snap = Snapshot {
                 own_client: 1,
                 tabs: vec![named(3, "a", true)],
-                binding: None,
+                ..Snapshot::default()
             };
             assert_eq!(on_tabs(Some(Binding::new(9, pin)), &snap), None);
         }
@@ -459,7 +562,7 @@ mod tests {
         let snap = Snapshot {
             own_client: 1,
             tabs: vec![named(3, "a", true), named(9, "b", false)],
-            binding: None,
+            ..Snapshot::default()
         };
         // The tab exists but the client never reached it: not in force, no pull-back.
         assert_eq!(on_tabs(Some(Binding::new(9, true)), &snap), None);
@@ -475,7 +578,7 @@ mod tests {
         let snap = Snapshot {
             own_client: 1,
             tabs: vec![named(3, "a", true)],
-            binding: None,
+            ..Snapshot::default()
         };
         let seen = Binding {
             seen: true,
@@ -520,12 +623,103 @@ mod tests {
     }
 
     #[test]
-    fn forget_clears_only_the_named_clients_binding() {
+    fn forget_freezes_only_the_named_clients_instance() {
         let (_, mut snap) = bound(7, true, vec![tab(7, 0, true, &[])]);
         snap.forget(2);
         assert!(snap.binding.is_some());
+        assert!(snap.connected);
         snap.forget(1);
         assert_eq!(snap.binding, None);
+        assert!(!snap.connected);
+    }
+
+    #[test]
+    fn frozen_instance_handles_nothing_and_never_leads() {
+        let mut snap = with_clients(1, &[]);
+        snap.freeze();
+        let bind = Request::Bind {
+            client: 1,
+            target: Target::Id(0),
+            pin: false,
+        };
+        for request in [
+            Some(&Request::State),
+            Some(&Request::Watch),
+            Some(&bind),
+            None,
+        ] {
+            assert!(!snap.handles(request));
+        }
+        assert!(!snap.is_leader());
+    }
+
+    #[test]
+    fn frozen_instance_makes_no_corrections() {
+        let (b, mut snap) = bound(9, true, vec![named(3, "a", true), named(9, "b", false)]);
+        snap.freeze();
+        assert_eq!(on_tabs(b, &snap), None);
+    }
+
+    #[test]
+    fn tab_update_unfreezes_without_a_binding() {
+        let (_, mut snap) = bound(9, true, vec![named(9, "b", true)]);
+        snap.freeze();
+        snap.apply_tabs(vec![named(3, "a", true), named(9, "b", false)]);
+        assert!(snap.connected);
+        assert_eq!(snap.binding, None);
+        assert!(snap.is_leader());
+        assert_eq!(on_tabs(snap.binding, &snap), None);
+    }
+
+    #[test]
+    fn leader_choice_skips_a_frozen_self() {
+        // Client 1 is the lowest id, yet frozen: it must not claim the leadership.
+        let mut frozen = with_clients(1, &[2]);
+        frozen.freeze();
+        assert!(!frozen.is_leader());
+        assert!(with_clients(2, &[]).is_leader());
+    }
+
+    #[test]
+    fn timed_out_focus_or_create_is_adopted_on_the_named_tab() {
+        let mut snap = with_clients(1, &[]);
+        snap.tabs = vec![named(3, "a", true)];
+        snap.finish_bind(&BindStep::FocusOrCreate("z".into()), true, None);
+        assert_eq!(snap.binding, None);
+        // Still on "a": not yet.
+        snap.apply_tabs(vec![named(3, "a", true)]);
+        assert_eq!(snap.binding, None);
+        // Another tab named "z" that the client isn't on: not yet.
+        snap.apply_tabs(vec![named(3, "a", true), named(5, "z", false)]);
+        assert_eq!(snap.binding, None);
+        snap.apply_tabs(vec![named(3, "a", false), named(5, "z", true)]);
+        assert_eq!(snap.binding, Some(Binding::new(5, true)));
+        assert_eq!(snap.pending, None);
+    }
+
+    #[test]
+    fn timed_out_create_new_is_adopted_on_the_new_active_tab() {
+        let mut snap = with_clients(1, &[]);
+        snap.tabs = vec![named(3, "a", true)];
+        snap.finish_bind(&BindStep::CreateNew(None), false, None);
+        // The old active tab is not the new one.
+        snap.apply_tabs(vec![named(3, "a", true)]);
+        assert_eq!(snap.binding, None);
+        snap.apply_tabs(vec![named(3, "a", false), named(8, "Tab #2", true)]);
+        assert_eq!(snap.binding, Some(Binding::new(8, false)));
+    }
+
+    #[test]
+    fn freezing_or_binding_again_drops_a_pending_bind() {
+        let mut snap = with_clients(1, &[]);
+        snap.finish_bind(&BindStep::CreateNew(None), false, None);
+        assert!(snap.pending.is_some());
+        snap.finish_bind(&BindStep::GoTo(3), true, Some(3));
+        assert_eq!(snap.pending, None);
+        assert_eq!(snap.binding, Some(Binding::new(3, true)));
+        snap.finish_bind(&BindStep::CreateNew(None), false, None);
+        snap.freeze();
+        assert_eq!(snap.pending, None);
     }
 
     #[test]
