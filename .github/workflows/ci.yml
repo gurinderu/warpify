@@ -6,9 +6,16 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - uses: nix-community/cache-nix-action@v7
         with:
-          targets: wasm32-wasip1
-          components: clippy, rustfmt
-      - run: scripts/gate.sh
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+      # Put the devShell's cargo/rustc on PATH so rust-cache keys on the right rustc.
+      - run: dirname "$(nix develop -c which cargo)" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+      - run: nix develop -c scripts/gate.sh

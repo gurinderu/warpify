@@ -1,0 +1,49 @@
+name: release-please
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+  # Assets are built here, not in a tag-triggered workflow: a tag (or release)
+  # created with GITHUB_TOKEN does not trigger other workflows.
+  assets:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: cachix/install-nix-action@v31
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+      # Put the devShell's cargo/rustc on PATH so rust-cache keys on the right rustc.
+      - run: dirname "$(nix develop -c which cargo)" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - run: nix develop -c cargo build -p warpify-plugin --target wasm32-wasip1 --release
+      - run: |
+          cp target/wasm32-wasip1/release/warpify.wasm warpify.wasm
+          sha256sum warpify.wasm > warpify.wasm.sha256
+      - run: gh release upload "$TAG" warpify.wasm warpify.wasm.sha256 --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
