@@ -1,6 +1,9 @@
 //! The plugin's session logic, free of zellij types so it builds and tests on the host: the
 //! plugin converts what zellij reports into these snapshots and asks them what to answer.
 
+use std::collections::BTreeSet;
+
+use serde::{Deserialize, Serialize};
 use warpify_proto::{Client, ClientId, Request, State, Tab, TabId, Target};
 
 /// A tab as one plugin instance sees it in its own `TabUpdate`.
@@ -34,14 +37,14 @@ pub struct Binding {
     pub tab: TabId,
     /// Keep the client on the tab: switching away is undone.
     pub pin: bool,
-    /// The bound tab has appeared in a `TabUpdate`. A bind creates tabs asynchronously, so an
-    /// update queued before the creation can arrive after it; until the tab is seen, its absence
-    /// is not evidence that it is gone.
+    /// The instance's own client has been seen on the bound tab. Until then the binding is not
+    /// in force: a bind creates tabs asynchronously and may fail, so neither a missing tab nor
+    /// a client elsewhere is evidence about the binding (graph @nick/warpify, node #9).
     pub seen: bool,
 }
 
 impl Binding {
-    /// A fresh binding on `tab`, not seen yet.
+    /// A fresh binding on `tab`, not in force yet.
     #[must_use]
     pub fn new(tab: TabId, pin: bool) -> Self {
         Self {
@@ -51,11 +54,11 @@ impl Binding {
         }
     }
 
-    /// This binding, marked seen if `tabs` lists its tab.
+    /// This binding, marked seen if the own client is on its tab in `tabs`.
     #[must_use]
     pub fn seen_in(self, tabs: &[TabSnapshot]) -> Self {
         Self {
-            seen: self.seen || tabs.iter().any(|t| t.id == self.tab),
+            seen: self.seen || tabs.iter().any(|t| t.active && t.id == self.tab),
             ..self
         }
     }
@@ -109,6 +112,52 @@ pub fn on_tabs(binding: Option<Binding>, snapshot: &Snapshot) -> Option<Correcti
     (binding.pin && !on_bound).then_some(Correction::GoTo(binding.tab))
 }
 
+/// The 1-based index `switch_tab_to` takes for the tab `id`: zellij's `GoToTab` does
+/// `index.saturating_sub(1)` and then looks the tab up by position (zellij-server 0.45.1,
+/// `screen.rs` `go_to_tab`), so index = position + 1. `None` if the tab isn't listed
+/// (graph @nick/warpify, node #9).
+#[must_use]
+pub fn tab_index(tabs: &[TabSnapshot], id: TabId) -> Option<u32> {
+    let position = tabs.iter().find(|t| t.id == id)?.position;
+    u32::try_from(position).ok()?.checked_add(1)
+}
+
+/// Pipe name of the plugin-to-plugin messages between instances.
+pub const INTERNAL_PIPE: &str = "warpify-internal";
+
+/// A message one instance sends to all instances of the plugin; kept out of the public proto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "msg", rename_all = "snake_case")]
+pub enum Internal {
+    /// `client` has left the session: the instance that belongs to it drops its binding, since
+    /// zellij keeps that instance and hands it to the next client with the same id (graph
+    /// @nick/warpify, node #9, risk #12).
+    Forget { client: ClientId },
+}
+
+impl Internal {
+    /// The message as the pipe payload.
+    ///
+    /// # Panics
+    /// Never: the type serializes infallibly.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        serde_json::to_string(self).expect("plain enum serializes")
+    }
+
+    /// # Errors
+    /// The payload isn't an internal message.
+    pub fn decode(payload: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(payload)
+    }
+}
+
+/// The clients that were in `before` and are not in `now`: they have disconnected.
+#[must_use]
+pub fn departed(before: &BTreeSet<ClientId>, now: &BTreeSet<ClientId>) -> Vec<ClientId> {
+    before.difference(now).copied().collect()
+}
+
 impl Snapshot {
     /// The wire state, clients derived from the tabs.
     #[must_use]
@@ -129,23 +178,31 @@ impl Snapshot {
     }
 
     /// Connected clients with their tabs: the own client is on the active tab, the others on the
-    /// tab listing them. Only the own client can be `managed`: this instance knows no other's
-    /// binding. A client listed twice is reported once, on the first tab.
+    /// tab listing them. A client listed twice is reported once, on the first tab.
     fn clients(&self) -> Vec<Client> {
         let mut clients: Vec<Client> = Vec::new();
         for tab in &self.tabs {
             let own = tab.active.then_some(self.own_client);
             for id in own.into_iter().chain(tab.other_clients.iter().copied()) {
                 if clients.iter().all(|c| c.id != id) {
-                    clients.push(Client {
-                        id,
-                        tab: tab.id,
-                        managed: id == self.own_client && self.binding.is_some(),
-                    });
+                    clients.push(Client { id, tab: tab.id });
                 }
             }
         }
         clients
+    }
+
+    /// Ids of the connected clients, own included.
+    #[must_use]
+    pub fn client_ids(&self) -> BTreeSet<ClientId> {
+        self.clients().iter().map(|c| c.id).collect()
+    }
+
+    /// Apply `Internal::Forget`: only the instance of that client drops its binding.
+    pub fn forget(&mut self, client: ClientId) {
+        if client == self.own_client {
+            self.binding = None;
+        }
     }
 
     /// The instance of the lowest connected client speaks for the session. With no client known
@@ -187,11 +244,7 @@ mod tests {
     }
 
     fn client(id: ClientId, tab: TabId) -> Client {
-        Client {
-            id,
-            tab,
-            managed: false,
-        }
+        Client { id, tab }
     }
 
     /// A snapshot for `own_client` where it and `others` share one tab.
@@ -282,6 +335,7 @@ mod tests {
         }
     }
 
+    /// A binding already in force (own client seen on its tab).
     fn bound(tab: TabId, pin: bool, tabs: Vec<TabSnapshot>) -> (Option<Binding>, Snapshot) {
         let binding = Some(Binding {
             tab,
@@ -377,30 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_own_bound_client_is_managed() {
-        let (_, mut snap) = bound(7, false, vec![tab(7, 0, true, &[4])]);
-        assert!(
-            snap.state()
-                .clients
-                .iter()
-                .find(|c| c.id == 1)
-                .unwrap()
-                .managed
-        );
-        assert!(
-            !snap
-                .state()
-                .clients
-                .iter()
-                .find(|c| c.id == 4)
-                .unwrap()
-                .managed
-        );
-        snap.binding = None;
-        assert!(snap.state().clients.iter().all(|c| !c.managed));
-    }
-
-    #[test]
     fn unseen_missing_tab_waits() {
         for pin in [false, true] {
             let snap = Snapshot {
@@ -413,13 +443,15 @@ mod tests {
     }
 
     #[test]
-    fn first_appearance_marks_seen() {
-        let tabs = [named(3, "a", true), named(9, "b", false)];
+    fn own_client_arriving_on_the_bound_tab_marks_seen() {
         let b = Binding::new(9, false);
-        assert!(!b.seen_in(&tabs[..1]).seen);
-        assert!(b.seen_in(&tabs).seen);
-        // Seen stays seen when the tab vanishes.
-        assert!(b.seen_in(&tabs).seen_in(&tabs[..1]).seen);
+        let elsewhere = [named(3, "a", true), named(9, "b", false)];
+        let arrived = [named(3, "a", false), named(9, "b", true)];
+        assert!(!b.seen_in(&elsewhere).seen);
+        assert!(b.seen_in(&arrived).seen);
+        // Seen stays seen when the client leaves or the tab vanishes.
+        assert!(b.seen_in(&arrived).seen_in(&elsewhere).seen);
+        assert!(b.seen_in(&arrived).seen_in(&elsewhere[..1]).seen);
     }
 
     #[test]
@@ -429,15 +461,78 @@ mod tests {
             tabs: vec![named(3, "a", true), named(9, "b", false)],
             binding: None,
         };
-        // Tab 9 is listed now, so this very update marks it seen and pulls back.
-        assert_eq!(
-            on_tabs(Some(Binding::new(9, true)), &snap),
-            Some(Correction::GoTo(9))
-        );
-        let before = Snapshot {
-            tabs: vec![named(3, "a", true)],
-            ..snap
+        // The tab exists but the client never reached it: not in force, no pull-back.
+        assert_eq!(on_tabs(Some(Binding::new(9, true)), &snap), None);
+        let seen = Binding {
+            seen: true,
+            ..Binding::new(9, true)
         };
-        assert_eq!(on_tabs(Some(Binding::new(9, true)), &before), None);
+        assert_eq!(on_tabs(Some(seen), &snap), Some(Correction::GoTo(9)));
+    }
+
+    #[test]
+    fn seen_binding_with_missing_tab_detaches() {
+        let snap = Snapshot {
+            own_client: 1,
+            tabs: vec![named(3, "a", true)],
+            binding: None,
+        };
+        let seen = Binding {
+            seen: true,
+            ..Binding::new(9, false)
+        };
+        assert_eq!(on_tabs(Some(seen), &snap), Some(Correction::Detach));
+    }
+
+    #[test]
+    fn tab_index_is_position_plus_one() {
+        let tabs = [
+            TabSnapshot {
+                position: 0,
+                ..named(7, "a", true)
+            },
+            TabSnapshot {
+                position: 1,
+                ..named(3, "b", false)
+            },
+        ];
+        assert_eq!(tab_index(&tabs, 7), Some(1));
+        assert_eq!(tab_index(&tabs, 3), Some(2));
+        assert_eq!(tab_index(&tabs, 9), None);
+    }
+
+    #[test]
+    fn departed_are_the_ids_that_vanished() {
+        let set = |ids: &[ClientId]| ids.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(departed(&set(&[1, 2, 3]), &set(&[1, 3, 4])), vec![2]);
+        assert_eq!(departed(&set(&[]), &set(&[1])), Vec::<ClientId>::new());
+        assert_eq!(departed(&set(&[1, 2]), &set(&[])), vec![1, 2]);
+    }
+
+    #[test]
+    fn client_ids_cover_own_and_others() {
+        let snap = Snapshot {
+            own_client: 1,
+            tabs: vec![tab(7, 0, true, &[4]), tab(9, 1, false, &[2])],
+            ..Snapshot::default()
+        };
+        assert_eq!(snap.client_ids(), BTreeSet::from([1, 2, 4]));
+    }
+
+    #[test]
+    fn forget_clears_only_the_named_clients_binding() {
+        let (_, mut snap) = bound(7, true, vec![tab(7, 0, true, &[])]);
+        snap.forget(2);
+        assert!(snap.binding.is_some());
+        snap.forget(1);
+        assert_eq!(snap.binding, None);
+    }
+
+    #[test]
+    fn internal_message_round_trips() {
+        let msg = Internal::Forget { client: 5 };
+        assert_eq!(msg.encode(), r#"{"msg":"forget","client":5}"#);
+        assert_eq!(Internal::decode(&msg.encode()).unwrap(), msg);
+        assert!(Internal::decode("{}").is_err());
     }
 }

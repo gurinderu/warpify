@@ -29,7 +29,7 @@ enum Cmd {
     State,
     /// print the state on every change (heartbeats are silent)
     Watch,
-    /// move a client to a tab and mark it managed
+    /// move a client to a tab and bind it there
     Bind {
         /// the client to move (see `state`)
         #[arg(long, value_name = "ID")]
@@ -360,18 +360,7 @@ mod tests {
                     name: "edit".into(),
                 },
             ],
-            clients: vec![
-                Client {
-                    id: 1,
-                    tab: 9,
-                    managed: false,
-                },
-                Client {
-                    id: 2,
-                    tab: 9,
-                    managed: false,
-                },
-            ],
+            clients: vec![Client { id: 1, tab: 9 }, Client { id: 2, tab: 9 }],
         };
         let mut buf = Vec::new();
         render(&state, &mut buf).unwrap();

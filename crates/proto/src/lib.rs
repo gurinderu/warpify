@@ -21,8 +21,8 @@ pub enum Request {
     State,
     /// Keep the pipe open and send a `Event::State` on every change plus periodic heartbeats.
     Watch,
-    /// Put `client` on `target` and mark it as managed: it's detached when its tab closes, and
-    /// with `pin` it's sent back to its tab whenever it wanders off.
+    /// Put `client` on `target` and bind it there: it's detached when its tab closes, and with
+    /// `pin` it's sent back to its tab whenever it wanders off.
     Bind {
         client: ClientId,
         target: Target,
@@ -65,10 +65,6 @@ pub struct Tab {
 pub struct Client {
     pub id: ClientId,
     pub tab: TabId,
-    /// Bound by `warpify attach`. Filled in by the CLI from its registry; the plugin always
-    /// reports `false`.
-    #[serde(default)]
-    pub managed: bool,
 }
 
 impl State {

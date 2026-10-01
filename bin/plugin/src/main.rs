@@ -2,8 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
-use warpify_session::{on_tabs, plan_bind, BindStep, Binding, Correction, Snapshot, TabSnapshot};
+use warpify_session::{
+    departed, on_tabs, plan_bind, tab_index, BindStep, Binding, Correction, Internal, Snapshot,
+    TabSnapshot, INTERNAL_PIPE,
+};
 use zellij_tile::prelude::*;
 
 /// zellij runs one instance of this plugin per connected client and fans every pipe message out
@@ -16,6 +20,9 @@ struct Warpify {
     watchers: BTreeSet<String>,
     /// Last state sent to watchers, to send only on change.
     last_sent: Option<State>,
+    /// Clients of the previous `TabUpdate`, to notice departures (graph @nick/warpify, node #9,
+    /// risk #12).
+    known_clients: BTreeSet<ClientId>,
 }
 
 register_plugin!(Warpify);
@@ -27,6 +34,8 @@ impl ZellijPlugin for Warpify {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::ReadCliPipes,
+            // To tell the other instances a client has left (graph @nick/warpify, node #9).
+            PermissionType::MessageAndLaunchOtherPlugins,
         ]);
         subscribe(&[
             EventType::TabUpdate,
@@ -42,6 +51,7 @@ impl ZellijPlugin for Warpify {
         match event {
             Event::TabUpdate(tabs) => {
                 self.session.tabs = tabs.iter().map(tab_snapshot).collect();
+                self.announce_departures();
                 self.correct_binding();
                 self.broadcast_if_changed();
             }
@@ -55,6 +65,10 @@ impl ZellijPlugin for Warpify {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == INTERNAL_PIPE {
+            self.on_internal(&message);
+            return false;
+        }
         if message.name != PIPE_NAME {
             return false;
         }
@@ -94,11 +108,47 @@ impl Warpify {
         self.session.state()
     }
 
+    /// Tell every instance of this plugin about clients that were in the previous update and are
+    /// gone now. zellij keeps a departed client's instance alive, with its binding, and hands it
+    /// to the next client with that id, and it signals no disconnects: the other instances are
+    /// the ones who see it. Duplicates from several instances are harmless (graph @nick/warpify,
+    /// node #9, risk #12). No destination: zellij fans the message out to every plugin instance in
+    /// the session, launching nothing (zellij-server `plugins/mod.rs`, `MessageFromPlugin`).
+    fn announce_departures(&mut self) {
+        let now = self.session.client_ids();
+        for client in departed(&self.known_clients, &now) {
+            tracing::info!(client, "client departed, telling instances to forget it");
+            let message = Internal::Forget { client };
+            pipe_message_to_plugin(
+                MessageToPlugin::new(INTERNAL_PIPE).with_payload(message.encode()),
+            );
+        }
+        self.known_clients = now;
+    }
+
+    fn on_internal(&mut self, message: &PipeMessage) {
+        if !matches!(message.source, PipeSource::Plugin(_)) {
+            return;
+        }
+        let Some(payload) = &message.payload else {
+            return;
+        };
+        match Internal::decode(payload) {
+            Ok(Internal::Forget { client }) => {
+                if client == self.session.own_client && self.session.binding.is_some() {
+                    tracing::info!(client, "forgetting binding of a departed client");
+                }
+                self.session.forget(client);
+            }
+            Err(err) => tracing::warn!(%err, payload, "bad internal message"),
+        }
+    }
+
     fn bind(&mut self, target: &warpify_proto::Target, pin: bool) {
         let client = self.session.own_client;
         let tab = match plan_bind(target, &self.session.tabs) {
             BindStep::GoTo(id) => {
-                go_to_tab_id(id);
+                go_to_tab_id(&self.session.tabs, id);
                 Some(id)
             }
             BindStep::FocusOrCreate(name) => focus_or_create_tab(&name),
@@ -116,7 +166,7 @@ impl Warpify {
         tracing::info!(client, tab, pin, "bind executed");
     }
 
-    /// Undo a drift from the binding (graph @nick/warpify, node #9).
+    /// Undo a drift from the binding, once the binding is in force (graph @nick/warpify, node #9).
     fn correct_binding(&mut self) {
         let client = self.session.own_client;
         let Some(binding) = self.session.binding else {
@@ -127,7 +177,7 @@ impl Warpify {
         match on_tabs(self.session.binding, &self.session) {
             Some(Correction::GoTo(tab)) => {
                 tracing::info!(client, tab, pin = binding.pin, "pin correction");
-                go_to_tab_id(tab);
+                go_to_tab_id(&self.session.tabs, tab);
             }
             Some(Correction::Detach) => {
                 tracing::info!(
@@ -163,11 +213,14 @@ impl Warpify {
     }
 }
 
-fn go_to_tab_id(id: TabId) {
-    run_action(
-        actions::Action::GoToTabById { id: id as u64 },
-        BTreeMap::new(),
-    );
+/// Move the own client to tab `id` by its index in the current snapshot; no `run_action`, which
+/// would need `RunActionsAsUser` (graph @nick/warpify, node #9).
+fn go_to_tab_id(tabs: &[TabSnapshot], id: TabId) {
+    if let Some(index) = tab_index(tabs, id) {
+        switch_tab_to(index);
+    } else {
+        tracing::warn!(id, "no such tab to go to");
+    }
 }
 
 fn send(pipe_id: &str, event: &WireEvent) {

@@ -148,11 +148,7 @@ mod tests {
                 .collect(),
             clients: clients
                 .iter()
-                .map(|(id, tab)| Client {
-                    id: *id,
-                    tab: *tab,
-                    managed: false,
-                })
+                .map(|(id, tab)| Client { id: *id, tab: *tab })
                 .collect(),
         }
     }
