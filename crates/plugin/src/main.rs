@@ -14,7 +14,8 @@ struct Warpify {
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
     clients: Vec<ClientInfo>,
-    /// CLI pipes held open by `watch`, by pipe id.
+    /// CLI pipes held open by `watch`, by pipe id. zellij gives no signal when a CLI watcher goes
+    /// away, so ids of dead pipes stay here (graph @nick/warpify, node #11).
     watchers: BTreeSet<String>,
     /// Last state sent to watchers, to send only on change.
     last_sent: Option<State>,
@@ -93,10 +94,12 @@ impl ZellijPlugin for Warpify {
             Ok(Request::State) => send(&pipe_id, &WireEvent::State(self.state())),
             Ok(Request::Watch) => {
                 block_cli_pipe_input(&pipe_id);
-                send(&pipe_id, &WireEvent::State(self.state()));
+                let state = self.state();
+                send(&pipe_id, &WireEvent::State(state.clone()));
+                self.last_sent = Some(state);
                 self.watchers.insert(pipe_id);
             }
-            // Feasible via the owning instance (graph @nick/warpify, node #10); next slice.
+            // Not implemented yet; design in graph @nick/warpify, node #9 (risk #10).
             Ok(Request::Bind { .. }) => eprintln!("warpify: bind is not implemented yet"),
             Err(err) => eprintln!("warpify: bad request {payload:?}: {err}"),
         }
