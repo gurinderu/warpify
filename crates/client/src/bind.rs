@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use warpify_proto::{ClientId, Request, State, Tab, TabId, Target};
+use warpify_proto::{base_tab_name, ClientId, Request, State, Tab, TabId, Target};
 
 use crate::{fetch_state, send, Error, SessionTarget};
 
@@ -81,7 +81,7 @@ pub fn confirmed<'a>(
     let tab = state.tab(state.client(client)?.tab)?;
     let ok = match target {
         Target::Id(id) => tab.id == *id,
-        Target::Name(name) => tab.name == *name,
+        Target::Name(name) => base_tab_name(&tab.name) == base_tab_name(name),
         Target::New(_) => Some(tab.id) != before,
     };
     ok.then_some(tab)
@@ -181,6 +181,12 @@ mod tests {
         assert_eq!(pick_new(&s, &[1]), Some(3));
         assert_eq!(pick_new(&s, &[]), Some(1));
         assert_eq!(pick_new(&s, &[1, 3, 5]), None);
+    }
+
+    #[test]
+    fn confirm_by_name_ignores_the_exit_suffix() {
+        let s = state(&[(0, "logs [ EXITED ] ")], &[(1, 0)]);
+        assert!(confirmed(&s, 1, &Target::Name("logs".into()), None).is_some());
     }
 
     #[test]

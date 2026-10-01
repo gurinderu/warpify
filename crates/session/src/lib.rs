@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
-use warpify_proto::{Client, ClientId, Request, State, Tab, TabId, Target};
+use warpify_proto::{base_tab_name, Client, ClientId, Request, State, Tab, TabId, Target};
 
 /// A tab as one plugin instance sees it in its own `TabUpdate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +36,14 @@ pub struct Snapshot {
     /// and still pipes every message to it, but no tab update reaches it until a client takes
     /// the id again. A frozen instance stays silent (graph @nick/warpify, node #9, risk #12).
     pub connected: bool,
+    /// When the last `TabUpdate` arrived, in milliseconds on the plugin's monotonic clock.
+    pub last_tab_update_ms: Option<u64>,
 }
+
+/// A `SessionUpdate` reporting no connected clients is ignored for this long after a
+/// `TabUpdate`: it can come from a disk scan with a stale count, while a `TabUpdate` is
+/// live evidence that a client is there.
+pub const STALE_ZERO_WINDOW_MS: u64 = 2_000;
 
 impl Default for Snapshot {
     fn default() -> Self {
@@ -46,6 +53,7 @@ impl Default for Snapshot {
             binding: None,
             pending: None,
             connected: true,
+            last_tab_update_ms: None,
         }
     }
 }
@@ -83,7 +91,9 @@ impl PendingBind {
     pub fn resolve(&self, tabs: &[TabSnapshot]) -> Option<TabId> {
         let active = tabs.iter().find(|t| t.active)?;
         match &self.kind {
-            PendingKind::FocusOrCreate(name) => (active.name == *name).then_some(active.id),
+            PendingKind::FocusOrCreate(name) => {
+                (base_tab_name(&active.name) == base_tab_name(name)).then_some(active.id)
+            }
             PendingKind::CreateNew => (!self.known.contains(&active.id)).then_some(active.id),
         }
     }
@@ -145,10 +155,13 @@ pub fn plan_bind(target: &Target, tabs: &[TabSnapshot]) -> BindStep {
     match target {
         Target::Id(id) if tabs.iter().any(|t| t.id == *id) => BindStep::GoTo(*id),
         Target::Id(id) => BindStep::Fail(format!("no tab with id {id}")),
-        Target::Name(name) => tabs.iter().find(|t| t.name == *name).map_or_else(
-            || BindStep::FocusOrCreate(name.clone()),
-            |t| BindStep::GoTo(t.id),
-        ),
+        Target::Name(name) => tabs
+            .iter()
+            .find(|t| base_tab_name(&t.name) == base_tab_name(name))
+            .map_or_else(
+                || BindStep::FocusOrCreate(name.clone()),
+                |t| BindStep::GoTo(t.id),
+            ),
         Target::New(name) => BindStep::CreateNew(name.clone()),
     }
 }
@@ -276,13 +289,24 @@ impl Snapshot {
 
     /// A tab update arrived, so a client holds this id: un-freeze (a fresh start, the binding
     /// stays cleared) and adopt a pending bind whose tab the client is now on.
-    pub fn apply_tabs(&mut self, tabs: Vec<TabSnapshot>) {
+    pub fn apply_tabs(&mut self, tabs: Vec<TabSnapshot>, now_ms: u64) {
         self.tabs = tabs;
+        self.last_tab_update_ms = Some(now_ms);
         self.connected = true;
         if let Some(tab) = self.pending.as_ref().and_then(|p| p.resolve(&self.tabs)) {
             let pin = self.pending.take().is_some_and(|p| p.pin);
             self.binding = Some(Binding::new(tab, pin));
         }
+    }
+
+    /// Whether a `SessionUpdate` reporting zero connected clients should freeze this instance:
+    /// not if a `TabUpdate` arrived less than [`STALE_ZERO_WINDOW_MS`] before `now_ms`.
+    #[must_use]
+    pub fn should_freeze_on_zero(&self, now_ms: u64) -> bool {
+        self.connected
+            && self
+                .last_tab_update_ms
+                .is_none_or(|at| now_ms.saturating_sub(at) >= STALE_ZERO_WINDOW_MS)
     }
 
     /// Record the outcome of a bind step: the tab zellij returned is the binding, no tab (the
@@ -291,7 +315,8 @@ impl Snapshot {
         self.binding = None;
         self.pending = None;
         if let Some(tab) = tab {
-            self.binding = Some(Binding::new(tab, pin));
+            // zellij sends no tab update for a switch to the tab the client is already on.
+            self.binding = Some(Binding::new(tab, pin).seen_in(&self.tabs));
             return;
         }
         let kind = match step {
@@ -664,7 +689,7 @@ mod tests {
     fn tab_update_unfreezes_without_a_binding() {
         let (_, mut snap) = bound(9, true, vec![named(9, "b", true)]);
         snap.freeze();
-        snap.apply_tabs(vec![named(3, "a", true), named(9, "b", false)]);
+        snap.apply_tabs(vec![named(3, "a", true), named(9, "b", false)], 0);
         assert!(snap.connected);
         assert_eq!(snap.binding, None);
         assert!(snap.is_leader());
@@ -687,12 +712,12 @@ mod tests {
         snap.finish_bind(&BindStep::FocusOrCreate("z".into()), true, None);
         assert_eq!(snap.binding, None);
         // Still on "a": not yet.
-        snap.apply_tabs(vec![named(3, "a", true)]);
+        snap.apply_tabs(vec![named(3, "a", true)], 0);
         assert_eq!(snap.binding, None);
         // Another tab named "z" that the client isn't on: not yet.
-        snap.apply_tabs(vec![named(3, "a", true), named(5, "z", false)]);
+        snap.apply_tabs(vec![named(3, "a", true), named(5, "z", false)], 0);
         assert_eq!(snap.binding, None);
-        snap.apply_tabs(vec![named(3, "a", false), named(5, "z", true)]);
+        snap.apply_tabs(vec![named(3, "a", false), named(5, "z", true)], 0);
         assert_eq!(snap.binding, Some(Binding::new(5, true)));
         assert_eq!(snap.pending, None);
     }
@@ -703,9 +728,9 @@ mod tests {
         snap.tabs = vec![named(3, "a", true)];
         snap.finish_bind(&BindStep::CreateNew(None), false, None);
         // The old active tab is not the new one.
-        snap.apply_tabs(vec![named(3, "a", true)]);
+        snap.apply_tabs(vec![named(3, "a", true)], 0);
         assert_eq!(snap.binding, None);
-        snap.apply_tabs(vec![named(3, "a", false), named(8, "Tab #2", true)]);
+        snap.apply_tabs(vec![named(3, "a", false), named(8, "Tab #2", true)], 0);
         assert_eq!(snap.binding, Some(Binding::new(8, false)));
     }
 
@@ -720,6 +745,54 @@ mod tests {
         snap.finish_bind(&BindStep::CreateNew(None), false, None);
         snap.freeze();
         assert_eq!(snap.pending, None);
+    }
+
+    #[test]
+    fn bind_to_the_current_tab_is_in_force_at_once() {
+        let mut snap = with_clients(1, &[]);
+        snap.tabs = vec![named(3, "a", true), named(5, "b", false)];
+        snap.finish_bind(&BindStep::GoTo(3), true, Some(3));
+        assert_eq!(snap.binding.map(|b| b.seen), Some(true));
+        // The next update, with the client drifted away, is pulled back.
+        snap.apply_tabs(vec![named(3, "a", false), named(5, "b", true)], 0);
+        assert_eq!(on_tabs(snap.binding, &snap), Some(Correction::GoTo(3)));
+    }
+
+    #[test]
+    fn bind_to_another_tab_waits_to_be_seen() {
+        let mut snap = with_clients(1, &[]);
+        snap.tabs = vec![named(3, "a", true), named(5, "b", false)];
+        snap.finish_bind(&BindStep::GoTo(5), true, Some(5));
+        assert_eq!(snap.binding.map(|b| b.seen), Some(false));
+    }
+
+    #[test]
+    fn zero_clients_is_ignored_right_after_a_tab_update() {
+        let mut snap = with_clients(1, &[]);
+        assert!(snap.should_freeze_on_zero(0), "no tab update yet");
+        snap.apply_tabs(vec![named(3, "a", true)], 10_000);
+        assert!(!snap.should_freeze_on_zero(10_000));
+        assert!(!snap.should_freeze_on_zero(11_999));
+        assert!(snap.should_freeze_on_zero(12_000));
+        assert!(snap.should_freeze_on_zero(60_000));
+    }
+
+    #[test]
+    fn frozen_instance_does_not_freeze_again() {
+        let mut snap = with_clients(1, &[]);
+        snap.freeze();
+        assert!(!snap.should_freeze_on_zero(60_000));
+    }
+
+    #[test]
+    fn exited_suffix_is_ignored_in_name_matching() {
+        let tabs = [named(3, "logs [ EXITED ] ", true)];
+        assert_eq!(
+            plan_bind(&Target::Name("logs".into()), &tabs),
+            BindStep::GoTo(3)
+        );
+        let pending = PendingBind::new(PendingKind::FocusOrCreate("logs".into()), false, &[]);
+        assert_eq!(pending.resolve(&tabs), Some(3));
     }
 
     #[test]
