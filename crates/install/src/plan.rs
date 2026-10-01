@@ -233,6 +233,21 @@ pub(crate) fn entry_may_be_in(seen: &Seen, entry: &str) -> bool {
     }
 }
 
+/// Refuses to touch a plugin file that is a symlink into the nix store: home-manager owns it.
+///
+/// # Errors
+/// When `wasm` is such a symlink; nothing has been written at that point.
+pub fn ensure_not_managed(wasm: &Path) -> Result<()> {
+    let linked = std::fs::symlink_metadata(wasm).is_ok_and(|m| m.file_type().is_symlink());
+    if linked && std::fs::canonicalize(wasm).is_ok_and(|real| real.starts_with(NIX_STORE)) {
+        return Err(Error::new(format!(
+            "the plugin at {} is managed by home-manager (programs.warpify); change it there",
+            wasm.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Looks at the config file and decides whether we may edit it: not a symlink into the nix
 /// store, not read-only, readable, and (when missing) its nearest existing directory is writable.
 #[must_use]
@@ -341,6 +356,31 @@ mod tests {
             "{sha_url}"
         );
         assert!(dest.ends_with(PLUGIN_FILE));
+    }
+
+    #[test]
+    fn a_plugin_symlinked_into_the_nix_store_is_refused() {
+        let Some(target) = std::fs::read_dir("/nix/store")
+            .ok()
+            .and_then(|mut d| d.find_map(|e| e.ok().filter(|e| e.path().is_file())))
+        else {
+            return; // no nix store on this machine
+        };
+        let t = tempfile::tempdir().unwrap();
+        let wasm = t.path().join("warpify-zellij.wasm");
+        assert!(ensure_not_managed(&wasm).is_ok(), "missing");
+        std::fs::write(&wasm, "x").unwrap();
+        assert!(ensure_not_managed(&wasm).is_ok(), "a plain copy");
+        std::fs::remove_file(&wasm).unwrap();
+        std::os::unix::fs::symlink(target.path(), &wasm).unwrap();
+        let e = ensure_not_managed(&wasm).unwrap_err().to_string();
+        assert_eq!(
+            e,
+            format!(
+                "the plugin at {} is managed by home-manager (programs.warpify); change it there",
+                wasm.display()
+            )
+        );
     }
 
     #[test]

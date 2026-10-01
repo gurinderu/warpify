@@ -127,6 +127,9 @@ The carrier table is in `REALITY.md` at the root, read on occasion. Before sayin
 | release | merge the release PR that release-please keeps open on main (conventional commits drive the version; the release gets warpify-zellij.wasm + .sha256) |
 | lint | `cargo clippy --workspace --exclude warpify-plugin --all-targets -- -D warnings` (plugin: `-p warpify-plugin --target wasm32-wasip1`) |
 | format | `cargo fmt --all` |
+| build the CLI with nix | `nix build .#warpify` |
+| build the plugin with nix (`result/lib/warpify-zellij.wasm`) | `nix build .#warpify-zellij` |
+| nix checks (both packages, home-manager module config) | `nix flake check` |
 
 The plugin lands at `target/wasm32-wasip1/release/warpify-zellij.wasm`; the CLI at `target/debug/warpify` (or `release`).
 - Toolchain and C linker come from the flake devShell: `nix develop` (or direnv with `.envrc`), then cargo / `scripts/gate.sh` as usual; outside it native builds fail for lack of `cc` (graph @nick/warpify, node #4).
@@ -134,6 +137,7 @@ The plugin lands at `target/wasm32-wasip1/release/warpify-zellij.wasm`; the CLI 
 
 ## Project structure
 - `flake.nix` / `.envrc` — devShell: Rust from `rust-toolchain.toml` via rust-overlay, plus the C linker.
+- `nix/` — flake outputs: `packages.<system>.{warpify,warpify-zellij,default}` (`packages.nix`; the plugin lands at `lib/warpify-zellij.wasm`), `homeManagerModules.{default,warpify}` (`home-manager.nix`: `programs.warpify`, a stable symlink to the plugin in the user's data dir (Linux `$XDG_DATA_HOME|~/.local/share`, macOS `~/Library/Application Support`), the same path `install` uses, `load_plugins`, an activation step running the hidden `warpify __grant-permissions`), `checks.<system>` (every system) (`checks.nix`; graph @nick/warpify, node #18).
 - Binary crates in `bin/` stay thin (wiring, args, I/O); logic lives in library crates in `crates/`, unit-tested on the host.
 - `Cargo.toml` — workspace; members `crates/proto`, `crates/session`, `crates/client`, `crates/telemetry`, `crates/install`, `bin/plugin`, `bin/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
 - `crates/proto` — `warpify-proto`: wire types shared by plugin and CLI (`Request`, `Target`, `Event`, `State`); pipe name `warpify`, NDJSON replies, heartbeat on `watch`.
