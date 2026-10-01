@@ -24,6 +24,7 @@ warpify-install = { path = "crates/install" }
 warpify-proto = { path = "crates/proto" }
 warpify-session = { path = "crates/session" }
 warpify-telemetry = { path = "crates/telemetry" }
+zellij-utils = "=0.45.1"
 
 [profile.release]
 opt-level = "s"

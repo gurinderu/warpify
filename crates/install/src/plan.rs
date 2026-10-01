@@ -3,7 +3,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::config::edit_install;
 use crate::{Error, Paths, Result};
 
 const REPO: &str = "https://github.com/gurinderu/warpify";
@@ -62,9 +61,11 @@ pub enum Action {
         file: PathBuf,
         entry: String,
     },
-    /// The config can't be edited here; `adding` says which way the snippet goes.
+    /// The config can't be edited here: executing reads `file` and prints the advice for
+    /// `entry`; `adding` says which way it goes.
     Manual {
-        snippet: String,
+        file: PathBuf,
+        entry: String,
         why: String,
         adding: bool,
     },
@@ -123,15 +124,6 @@ pub fn load_entry(wasm: &Path) -> Result<String> {
         .ok_or_else(|| Error::new("the plugin path is not valid UTF-8"))
 }
 
-/// The block to paste by hand: what `edit_install` would add to a config without one, so the
-/// zellij defaults stay (multi-line: zellij's KDL v1 wants a newline before `}`).
-fn snippet(entry: &str) -> Result<String> {
-    Ok(edit_install("", entry)?
-        .unwrap_or_default()
-        .trim_end()
-        .to_owned())
-}
-
 fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<Action> {
     let entry = load_entry(&paths.wasm)?;
     Ok(match access {
@@ -144,7 +136,8 @@ fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<A
             entry,
         },
         ConfigAccess::Manual(why) => Action::Manual {
-            snippet: snippet(&entry)?,
+            file: paths.config.clone(),
+            entry,
             why: why.clone(),
             adding,
         },
@@ -253,23 +246,21 @@ mod tests {
     }
 
     #[test]
-    fn manual_access_yields_the_exact_snippet() {
+    fn manual_access_yields_a_manual_action() {
         let plan = plan_install(
             &paths(),
             &Source::Local("/w.wasm".into()),
             &ConfigAccess::Manual("nix".into()),
         )
         .unwrap();
-        let Action::Manual {
-            snippet, adding, ..
-        } = &plan.actions[2]
-        else {
-            panic!("not manual")
-        };
-        assert!(adding);
         assert_eq!(
-            snippet,
-            "load_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify.wasm\"\n}"
+            plan.actions[2],
+            Action::Manual {
+                file: "/c/config.kdl".into(),
+                entry: "file:/d/warpify/warpify.wasm".into(),
+                why: "nix".into(),
+                adding: true,
+            }
         );
     }
 

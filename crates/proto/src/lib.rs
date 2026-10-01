@@ -115,7 +115,19 @@ pub fn base_tab_name(name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
+
+    #[test]
+    fn every_permission_name_is_one_zellij_knows() {
+        for name in PERMISSIONS {
+            assert!(
+                zellij_utils::data::PermissionType::from_str(name).is_ok(),
+                "zellij 0.45.1 has no permission named {name}"
+            );
+        }
+    }
 
     #[test]
     fn base_tab_name_strips_the_exit_suffix() {

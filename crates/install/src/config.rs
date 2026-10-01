@@ -19,6 +19,57 @@ fn defaults_block() -> KdlNode {
     doc.nodes_mut().remove(0)
 }
 const WHAT: &str = "the zellij config";
+/// First line of a `config.kdl` the installer created; uninstall deletes only files that have it.
+const CREATED_MARKER: &str = "// created by warpify install";
+
+/// `text` of a config file warpify is creating: the marker line on top.
+pub(crate) fn mark_created(text: &str) -> String {
+    format!("{CREATED_MARKER}\n{text}")
+}
+
+/// Whether uninstall may delete the file: `before` starts with our marker and `after` (the
+/// text with our entry removed) holds nothing but the marker, our defaults note and whitespace.
+pub(crate) fn only_ours_left(before: &str, after: &str) -> bool {
+    let note = format!("// {DEFAULTS_NOTE}");
+    before.lines().next() == Some(CREATED_MARKER)
+        && after
+            .lines()
+            .map(str::trim)
+            .all(|l| l.is_empty() || l == CREATED_MARKER || l == note)
+}
+
+/// What to tell a user whose config warpify must not edit: `text` is the file (`None`: there is
+/// none), `why` is why it is not editable. Adding to an existing `load_plugins` block is one line;
+/// without a block it is the whole block, zellij's defaults included.
+pub(crate) fn manual_advice(text: Option<&str>, entry: &str, adding: bool, why: &str) -> String {
+    let line = format!("\"{entry}\"");
+    let tail = format!("(it's managed outside warpify: {why})");
+    if !adding {
+        return format!("remove this line from your load_plugins block: {line} {tail}");
+    }
+    let doc = match text.map(|t| parse(t, WHAT)) {
+        Some(Ok(doc)) => doc,
+        Some(Err(e)) => {
+            return format!("{line}\nadd this line inside your load_plugins block ({e}) {tail}")
+        }
+        None => KdlDocument::new(),
+    };
+    match doc.get(BLOCK) {
+        Some(block) if has_child(block, entry) => {
+            format!("{line}\nalready in your load_plugins block, nothing to add {tail}")
+        }
+        Some(_) => {
+            format!("{line}\nadd this line inside your existing load_plugins block {tail}")
+        }
+        None => {
+            let block = edit_install("", entry).ok().flatten().unwrap_or_default();
+            format!(
+                "{}\nadd this block to your zellij config (load_plugins replaces zellij's defaults, so they are in it) {tail}",
+                block.trim_end()
+            )
+        }
+    }
+}
 
 /// Adds `entry` (e.g. `file:/abs/warpify.wasm`) to `load_plugins`. A block that exists only gets
 /// our child; when there is none it is created at the end with zellij's default entries too: new text, `None` when the entry is already there.
@@ -139,12 +190,17 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_restores_the_original_byte_for_byte_and_drops_our_block() {
-        for base in ["// c\na 1\n", "a 1", ""] {
+    fn uninstall_restores_the_original_bytes_exactly_and_drops_our_block() {
+        for base in ["// c\na 1\n", "a 1\n", ""] {
             let installed = edit_install(base, E).unwrap().unwrap();
             let removed = edit_uninstall(&installed, E).unwrap().unwrap();
-            assert_eq!(removed.trim_end(), base.trim_end(), "{removed:?}");
+            assert_eq!(removed, base, "{removed:?}");
         }
+        // The one inexact case: KDL needs the last line terminated, so install added a newline
+        // and uninstall can't tell it from one the user wrote (a blank line before a block is
+        // theirs to keep).
+        let installed = edit_install("a 1", E).unwrap().unwrap();
+        assert_eq!(edit_uninstall(&installed, E).unwrap().unwrap(), "a 1\n");
         assert_eq!(
             edit_uninstall(&edit_install("", E).unwrap().unwrap(), E).unwrap(),
             Some(String::new())
@@ -165,6 +221,59 @@ mod tests {
             "load_plugins {\n    \"file:/x.wasm\"\n    \"file:/d/warpify/warpify.wasm\"\n}\n";
         let out = edit_uninstall(base, E).unwrap().unwrap();
         assert_eq!(out, "load_plugins {\n    \"file:/x.wasm\"\n}\n");
+    }
+
+    #[test]
+    fn marker_rules_decide_what_uninstall_may_delete() {
+        let created = mark_created(&edit_install("", E).unwrap().unwrap());
+        let after = edit_uninstall(&created, E).unwrap().unwrap();
+        assert!(only_ours_left(&created, &after), "{after:?}");
+        // no marker: the user's file, however empty it ends up
+        let theirs = edit_install("", E).unwrap().unwrap();
+        assert!(!only_ours_left(&theirs, ""));
+        // marker, but something else is in the file
+        let mixed = format!("{created}theme \"x\"\n");
+        let after = edit_uninstall(&mixed, E).unwrap().unwrap();
+        assert!(!only_ours_left(&mixed, &after), "{after:?}");
+        // marker, but the block holds another plugin
+        let shared = created.replace(
+            "    \"zellij:link\"",
+            "    \"zellij:link\"\n    \"file:/x.wasm\"",
+        );
+        let after = edit_uninstall(&shared, E).unwrap().unwrap();
+        assert!(!only_ours_left(&shared, &after), "{after:?}");
+    }
+
+    #[test]
+    fn manual_advice_follows_the_config() {
+        let add = |t: Option<&str>| manual_advice(t, E, true, "nix");
+        let line = format!("\"{E}\"");
+        let with_block = add(Some("load_plugins {\n    \"zellij:link\"\n}\n"));
+        assert!(
+            with_block.starts_with(&format!(
+                "{line}\nadd this line inside your existing load_plugins block"
+            )),
+            "{with_block}"
+        );
+        assert!(!with_block.contains("zellij:link"), "{with_block}");
+        for t in [None, Some("a 1\n")] {
+            let out = add(t);
+            assert!(out.starts_with(NEW_BLOCK.trim_end()), "{out}");
+            assert!(out.contains("add this block"), "{out}");
+        }
+        let present = add(Some(NEW_BLOCK));
+        assert!(present.contains("nothing to add"), "{present}");
+        let broken = add(Some("load_plugins {"));
+        assert!(
+            broken.starts_with(&line) && broken.contains("not valid KDL"),
+            "{broken}"
+        );
+        let rm = manual_advice(Some(NEW_BLOCK), E, false, "nix");
+        assert_eq!(
+            rm,
+            format!("remove this line from your load_plugins block: {line} (it's managed outside warpify: nix)")
+        );
+        assert!(!rm.contains("block itself"), "{rm}");
     }
 
     #[test]
