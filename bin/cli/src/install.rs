@@ -80,7 +80,6 @@ mod tests {
     fn paths() -> Paths {
         Paths {
             wasm: "/d/warpify/warpify-zellij.wasm".into(),
-            legacy_wasm: "/d/warpify/warpify.wasm".into(),
             config: "/c/config.kdl".into(),
             permissions: "/k/permissions.kdl".into(),
         }

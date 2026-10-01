@@ -2,12 +2,10 @@
 
 use std::path::Path;
 
-use crate::config::{
-    edit_install, edit_uninstall, lists_entry, manual_advice, mark_created, only_ours_left,
-};
+use crate::config::{edit_install, edit_uninstall, manual_advice, mark_created, only_ours_left};
 use crate::fsutil::{backup_once, backup_path, read_optional, remove_if_exists, write_atomic};
 use crate::permissions::{merge_permissions, remove_permissions};
-use crate::plan::{entry_may_be_in, load_entry, Action, LegacyConfig, Plan};
+use crate::plan::{load_entry, Action, Plan};
 use crate::{verify_sha256, Error, Result};
 use warpify_proto::PERMISSIONS;
 
@@ -80,12 +78,6 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
         } else {
             format!("{} was not there", dest.display())
         }),
-        Action::RemoveLegacy {
-            wasm,
-            permissions,
-            config,
-            entry,
-        } => remove_legacy(wasm, permissions, config, entry),
         Action::Manual {
             file,
             entry,
@@ -94,48 +86,6 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
             seen,
         } => Ok(manual_advice(file, seen, entry, *adding, why)),
     }
-}
-
-/// Cleans up a 0.1.0 install and says in one line what it found; an empty line when there was
-/// nothing to clean.
-fn remove_legacy(
-    wasm: &Path,
-    permissions: &Path,
-    config: &LegacyConfig,
-    entry: &str,
-) -> Result<String> {
-    let mut found = Vec::new();
-    let held = |file: &Path| read_optional(file).map(Option::unwrap_or_default);
-    if remove_permissions(&held(permissions)?, wasm)?.is_some() {
-        remove_permissions_file(permissions, wasm)?;
-        found.push("its permissions entry".to_owned());
-    }
-    let mut by_hand = String::new();
-    match config {
-        LegacyConfig::Edit(file) if lists_entry(&held(file)?, entry) => {
-            edit_config(file, false, |t| edit_uninstall(t, entry))?;
-            found.push("its load_plugins line".to_owned());
-        }
-        LegacyConfig::ByHand { seen, .. } if entry_may_be_in(seen, entry) => {
-            by_hand =
-                format!("also remove this old line from your load_plugins block: \"{entry}\"");
-        }
-        _ => {}
-    }
-    if remove_if_exists(wasm)? {
-        found.insert(0, format!("the file {}", wasm.display()));
-    }
-    let mut said = Vec::new();
-    if !found.is_empty() {
-        said.push(format!("removed {}", found.join(", ")));
-    }
-    said.extend(Some(by_hand).filter(|b| !b.is_empty()));
-    Ok(if said.is_empty() {
-        String::new()
-    } else {
-        let name = wasm.file_name().unwrap_or_default().to_string_lossy();
-        format!("cleaned up the old {name} install: {}", said.join("; "))
-    })
 }
 
 /// Reads `file` (missing counts as empty), applies `change`, writes when it says so.
@@ -251,10 +201,6 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let p = Paths {
             wasm: t.path().join("data/warpify").join(crate::PLUGIN_FILE),
-            legacy_wasm: t
-                .path()
-                .join("data/warpify")
-                .join(crate::LEGACY_PLUGIN_FILE),
             config: t.path().join("cfg/config.kdl"),
             permissions: t.path().join("cache/zellij/permissions.kdl"),
         };
@@ -561,89 +507,6 @@ mod tests {
         assert!(out[0].contains("couldn't read"), "{out:?}");
         assert!(p.wasm.exists());
         std::fs::set_permissions(&p.config, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
-
-    /// A 0.1.0 install: its file, its grants and its `load_plugins` line, next to a user's own.
-    fn seed_legacy(p: &Paths) -> (String, String) {
-        let entry = entry_for(&p.legacy_wasm).unwrap();
-        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(p.legacy_wasm.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(p.permissions.parent().unwrap()).unwrap();
-        std::fs::write(&p.legacy_wasm, b"old").unwrap();
-        let config = format!("a 1\nload_plugins {{\n    \"zellij:link\"\n    \"{entry}\"\n}}\n");
-        std::fs::write(&p.config, &config).unwrap();
-        let grants = format!("\"{}\" {{\n    ReadCliPipes\n}}\n", p.legacy_wasm.display());
-        std::fs::write(&p.permissions, grants).unwrap();
-        (entry, config)
-    }
-
-    #[test]
-    fn install_cleans_a_0_1_0_install_and_says_so_in_one_line() {
-        let (t, p) = sandbox();
-        let (entry, _) = seed_legacy(&p);
-        let local = t.path().join("l.wasm");
-        std::fs::write(&local, b"new").unwrap();
-        let none = Fake(HashMap::new(), RefCell::default());
-        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
-        let out = execute(&plan, &none).unwrap();
-        assert_eq!(out.len(), 4, "{out:?}");
-        assert!(
-            out[3].starts_with("cleaned up the old warpify.wasm install: removed the file ")
-                && out[3].contains("its permissions entry, its load_plugins line"),
-            "{out:?}"
-        );
-        assert!(!p.legacy_wasm.exists() && p.wasm.exists());
-        let config = read(&p.config);
-        assert!(!config.contains(&entry), "{config}");
-        assert!(config.contains(&entry_for(&p.wasm).unwrap()), "{config}");
-        let grants = read(&p.permissions);
-        assert!(!grants.contains("warpify.wasm\""), "{grants}");
-        assert!(grants.contains("warpify-zellij.wasm"), "{grants}");
-        // nothing left to clean: an empty line, which the CLI doesn't print
-        assert_eq!(execute(&plan, &none).unwrap()[3], "");
-    }
-
-    #[test]
-    fn uninstall_removes_the_new_and_the_legacy_artifact() {
-        let (t, p) = sandbox();
-        seed_legacy(&p);
-        let local = t.path().join("l.wasm");
-        std::fs::write(&local, b"new").unwrap();
-        let none = Fake(HashMap::new(), RefCell::default());
-        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
-        execute(&plan, &none).unwrap();
-        // the user's file has no backup left to speak of; only the two grants matter here
-        std::fs::write(&p.legacy_wasm, b"old").unwrap();
-        let out = execute(&plan_uninstall(&p, &ConfigAccess::Editable).unwrap(), &none).unwrap();
-        assert!(out[3].contains("removed the file"), "{out:?}");
-        assert!(!p.wasm.exists() && !p.legacy_wasm.exists());
-        assert!(!p.permissions.exists());
-        assert!(!read(&p.config).contains("warpify"), "{}", read(&p.config));
-    }
-
-    #[test]
-    fn by_hand_the_legacy_line_is_advice_and_the_files_still_go() {
-        let (t, p) = sandbox();
-        let (entry, config) = seed_legacy(&p);
-        let local = t.path().join("l.wasm");
-        std::fs::write(&local, b"new").unwrap();
-        let none = Fake(HashMap::new(), RefCell::default());
-        let access = manual("nix", Seen::Text(config.clone()));
-        let plan = plan_install(&p, &Source::Local(local), &access).unwrap();
-        let out = execute(&plan, &none).unwrap();
-        assert!(
-            out[3].contains("removed the file")
-                && out[3].ends_with(&format!(
-                    "also remove this old line from your load_plugins block: \"{entry}\""
-                )),
-            "{out:?}"
-        );
-        assert!(!p.legacy_wasm.exists());
-        assert_eq!(read(&p.config), config);
-        // the config holds no legacy line: no advice
-        let clean = manual("nix", Seen::Text("a 1\n".into()));
-        let out = execute(&plan_uninstall(&p, &clean).unwrap(), &none).unwrap();
-        assert!(!out.iter().any(|l| l.contains("also remove")), "{out:?}");
     }
 
     fn read(p: &Path) -> String {
