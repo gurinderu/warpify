@@ -4,9 +4,17 @@ use std::io::{self, BufWriter, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode, Stdio};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use warpify_client::SessionTarget;
 use warpify_proto::{ClientId, Event, Request, State, TabId, Target};
+
+mod install;
+
+/// What `install`/`uninstall` set up; more integrations fit here later.
+#[derive(Clone, Copy, ValueEnum)]
+enum Integration {
+    Zellij,
+}
 
 /// Talks to the warpify zellij plugin of a session (the current one, or --session) over
 /// `zellij pipe`. The plugin must already be loaded in the session (zellij config or layout).
@@ -29,6 +37,23 @@ enum Cmd {
     State,
     /// print the state on every change (heartbeats are silent)
     Watch,
+    /// install the plugin for an integration (zellij: download, grant permissions, load it)
+    Install {
+        integration: Integration,
+        /// use this local plugin build instead of downloading the release
+        #[arg(long, value_name = "PATH")]
+        wasm: Option<std::path::PathBuf>,
+        /// print what would be done, change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// undo `install`
+    Uninstall {
+        integration: Integration,
+        /// print what would be done, change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// move a client to a tab and bind it there
     Bind {
         /// the client to move (see `state`)
@@ -121,6 +146,15 @@ fn main() -> ExitCode {
             target,
             pin,
         } => bind(&session_target(cli.session), client, &target.target(), pin),
+        Cmd::Install {
+            integration,
+            wasm,
+            dry_run,
+        } => install::install(integration, wasm, dry_run),
+        Cmd::Uninstall {
+            integration,
+            dry_run,
+        } => install::uninstall(integration, dry_run),
         Cmd::Attach { target, pin } => attach(cli.session.as_deref(), &target.target(), pin),
         Cmd::BindNew { known, target, pin } => {
             bind_new(cli.session.as_deref(), &known, &target.target(), pin)
@@ -304,6 +338,22 @@ mod tests {
             Cli::try_parse_from(["warpify", "watch"]).unwrap().command,
             Cmd::Watch
         ));
+    }
+
+    #[test]
+    fn install_parses_integration_and_flags() {
+        let Cmd::Install { wasm, dry_run, .. } =
+            Cli::try_parse_from(["warpify", "install", "zellij", "--wasm", "/w", "--dry-run"])
+                .unwrap()
+                .command
+        else {
+            panic!("not install")
+        };
+        assert_eq!(wasm, Some("/w".into()));
+        assert!(dry_run);
+        assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij"]).is_ok());
+        assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij", "--wasm", "x"]).is_err());
+        assert!(Cli::try_parse_from(["warpify", "install", "tmux"]).is_err());
     }
 
     #[test]

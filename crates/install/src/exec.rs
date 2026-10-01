@@ -1,0 +1,253 @@
+//! Carrying a `Plan` out. Each action returns one line saying what happened.
+
+use std::path::Path;
+
+use crate::config::{edit_install, edit_uninstall};
+use crate::fsutil::{backup_once, read_optional, remove_if_exists, write_atomic};
+use crate::permissions::{merge_permissions, remove_permissions};
+use crate::plan::{load_entry, Action, Plan};
+use crate::{verify_sha256, Error, Result};
+use warpify_proto::PERMISSIONS;
+
+/// Fetches a URL's body; behind a trait so tests need no network.
+pub trait Fetcher {
+    /// # Errors
+    /// On any transport or HTTP failure.
+    fn get(&self, url: &str) -> Result<Vec<u8>>;
+}
+
+/// The real thing: blocking HTTPS through `ureq` (rustls).
+pub struct UreqFetcher;
+
+const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+impl Fetcher for UreqFetcher {
+    fn get(&self, url: &str) -> Result<Vec<u8>> {
+        let mut response = ureq::get(url)
+            .call()
+            .map_err(|e| Error::new(format!("can't download {url}: {e}")))?;
+        response
+            .body_mut()
+            .with_config()
+            .limit(MAX_BYTES)
+            .read_to_vec()
+            .map_err(|e| Error::new(format!("can't read {url}: {e}")))
+    }
+}
+
+/// Runs the actions in order, stopping at the first failure.
+///
+/// # Errors
+/// On the first action that fails; earlier ones stay done.
+pub fn execute(plan: &Plan, fetcher: &dyn Fetcher) -> Result<Vec<String>> {
+    plan.actions.iter().map(|a| run(a, fetcher)).collect()
+}
+
+fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
+    tracing::debug!(%action, "running");
+    match action {
+        Action::FetchWasm { url, sha_url, dest } => {
+            let sha = String::from_utf8(fetcher.get(sha_url)?)
+                .map_err(|_| Error::new(format!("{sha_url} is not text")))?;
+            let bytes = fetcher.get(url)?;
+            verify_sha256(&bytes, &sha)?;
+            write_atomic(dest, &bytes)?;
+            Ok(format!(
+                "downloaded and verified the plugin to {}",
+                dest.display()
+            ))
+        }
+        Action::CopyWasm { from, dest } => {
+            let bytes = std::fs::read(from)
+                .map_err(|e| Error::new(format!("can't read {}: {e}", from.display())))?;
+            write_atomic(dest, &bytes)?;
+            Ok(format!("copied the plugin to {}", dest.display()))
+        }
+        Action::MergePermissions { file, wasm } => edit(file, "permissions", |t| {
+            merge_permissions(t, wasm, PERMISSIONS)
+        }),
+        Action::RemovePermissions { file, wasm } => {
+            edit(file, "permissions", |t| remove_permissions(t, wasm))
+        }
+        Action::AddLoadPlugin { file, entry } => edit_config(file, |t| edit_install(t, entry)),
+        Action::RemoveLoadPlugin { file, entry } => edit_config(file, |t| edit_uninstall(t, entry)),
+        Action::RemoveWasm { dest } => Ok(if remove_if_exists(dest)? {
+            format!("removed {}", dest.display())
+        } else {
+            format!("{} was not there", dest.display())
+        }),
+        Action::Manual {
+            snippet,
+            why,
+            adding,
+        } => {
+            let (verb, prep) = if *adding {
+                ("add", "to")
+            } else {
+                ("remove", "from")
+            };
+            Ok(format!(
+                "{snippet}\n{verb} this {prep} your zellij config (it's managed outside warpify: {why})"
+            ))
+        }
+    }
+}
+
+/// Reads `file` (missing counts as empty), applies `change`, writes when it says so.
+fn edit(
+    file: &Path,
+    what: &str,
+    change: impl FnOnce(&str) -> Result<Option<String>>,
+) -> Result<String> {
+    let Some(new) = change(&read_optional(file)?.unwrap_or_default())? else {
+        return Ok(format!("{what} in {} already up to date", file.display()));
+    };
+    write_atomic(file, new.as_bytes())?;
+    Ok(format!("updated {what} in {}", file.display()))
+}
+
+/// Like `edit`, with a one-time backup of the original.
+fn edit_config(file: &Path, change: impl FnOnce(&str) -> Result<Option<String>>) -> Result<String> {
+    let current = read_optional(file)?;
+    let Some(new) = change(current.as_deref().unwrap_or_default())? else {
+        return Ok(format!("config {} already up to date", file.display()));
+    };
+    let backup = backup_once(file)?;
+    write_atomic(file, new.as_bytes())?;
+    Ok(match backup {
+        Some(b) => format!(
+            "updated config {} (original saved as {})",
+            file.display(),
+            b.display()
+        ),
+        None => format!("updated config {}", file.display()),
+    })
+}
+
+/// The entry a plan would put into `load_plugins`, for callers that print it.
+///
+/// # Errors
+/// When the path is not valid UTF-8.
+pub fn entry_for(wasm: &Path) -> Result<String> {
+    load_entry(wasm)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::plan::{plan_install, plan_uninstall, ConfigAccess, Source};
+    use crate::Paths;
+
+    struct Fake(HashMap<String, Vec<u8>>, RefCell<Vec<String>>);
+    impl Fetcher for Fake {
+        fn get(&self, url: &str) -> Result<Vec<u8>> {
+            self.1.borrow_mut().push(url.to_owned());
+            self.0.get(url).cloned().ok_or_else(|| Error::new("404"))
+        }
+    }
+
+    fn sandbox() -> (tempfile::TempDir, Paths) {
+        let t = tempfile::tempdir().unwrap();
+        let p = Paths {
+            wasm: t.path().join("data/warpify/warpify.wasm"),
+            config: t.path().join("cfg/config.kdl"),
+            permissions: t.path().join("cache/zellij/permissions.kdl"),
+        };
+        (t, p)
+    }
+
+    fn fake(wasm: &[u8], sha: &str) -> Fake {
+        let mut m = HashMap::new();
+        m.insert(crate::release_url("1.2.3", "warpify.wasm"), wasm.to_vec());
+        m.insert(
+            crate::release_url("1.2.3", "warpify.wasm.sha256"),
+            sha.as_bytes().to_vec(),
+        );
+        Fake(m, RefCell::default())
+    }
+
+    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn download_verifies_before_writing() {
+        let (_t, p) = sandbox();
+        let rel = Source::Release {
+            version: "1.2.3".into(),
+        };
+        let plan = plan_install(&p, &rel, &ConfigAccess::Editable).unwrap();
+        let bad = fake(b"abd", ABC);
+        assert!(execute(&plan, &bad)
+            .unwrap_err()
+            .to_string()
+            .contains("mismatch"));
+        assert!(!p.wasm.exists());
+        let good = fake(b"abc", &format!("{ABC}  warpify.wasm\n"));
+        execute(&plan, &good).unwrap();
+        assert_eq!(std::fs::read(&p.wasm).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn install_twice_changes_nothing_the_second_time_then_uninstall_cleans() {
+        let (t, p) = sandbox();
+        let local = t.path().join("local.wasm");
+        std::fs::write(&local, b"wasm").unwrap();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "theme \"x\"\n").unwrap();
+        let none = Fake(HashMap::new(), RefCell::default());
+        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
+        let first = execute(&plan, &none).unwrap();
+        assert!(first[2].contains("original saved as"), "{first:?}");
+        let (cfg1, perm1) = (read(&p.config), read(&p.permissions));
+        let second = execute(&plan, &none).unwrap();
+        assert!(
+            second[1].contains("already up to date") && second[2].contains("already up to date")
+        );
+        assert_eq!((read(&p.config), read(&p.permissions)), (cfg1, perm1));
+        assert_eq!(
+            read(&p.config.with_file_name("config.kdl.warpify.bak")),
+            "theme \"x\"\n"
+        );
+
+        let out = execute(&plan_uninstall(&p, &ConfigAccess::Editable).unwrap(), &none).unwrap();
+        assert!(out[2].starts_with("removed"));
+        assert_eq!(read(&p.config).trim_end(), "theme \"x\"");
+        assert_eq!(read(&p.permissions).trim(), "");
+        assert!(!p.wasm.exists());
+    }
+
+    #[test]
+    fn missing_config_in_a_writable_dir_is_created_with_just_the_block() {
+        let (t, p) = sandbox();
+        let local = t.path().join("l.wasm");
+        std::fs::write(&local, b"w").unwrap();
+        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
+        execute(&plan, &Fake(HashMap::new(), RefCell::default())).unwrap();
+        let entry = entry_for(&p.wasm).unwrap();
+        assert_eq!(
+            read(&p.config),
+            format!("load_plugins {{\n    \"{entry}\"\n}}\n")
+        );
+    }
+
+    #[test]
+    fn manual_access_touches_no_config() {
+        let (t, p) = sandbox();
+        let local = t.path().join("l.wasm");
+        std::fs::write(&local, b"w").unwrap();
+        let access = ConfigAccess::Manual("nix".into());
+        let plan = plan_install(&p, &Source::Local(local), &access).unwrap();
+        let lines = execute(&plan, &Fake(HashMap::new(), RefCell::default())).unwrap();
+        assert!(
+            lines[2].contains("load_plugins {\n    \"file:"),
+            "{lines:?}"
+        );
+        assert!(!p.config.exists());
+    }
+
+    fn read(p: &Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+}

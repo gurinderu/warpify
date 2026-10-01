@@ -1,0 +1,18 @@
+[package]
+name = "warpify-install"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kdl.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+warpify-proto.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

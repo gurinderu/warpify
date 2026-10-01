@@ -1,0 +1,21 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - run: cargo build -p warpify-plugin --target wasm32-wasip1 --release
+      - run: |
+          cp target/wasm32-wasip1/release/warpify.wasm warpify.wasm
+          sha256sum warpify.wasm > warpify.wasm.sha256
+      - run: gh release create "$GITHUB_REF_NAME" warpify.wasm warpify.wasm.sha256 --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
