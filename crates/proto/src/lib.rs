@@ -21,8 +21,8 @@ pub enum Request {
     State,
     /// Keep the pipe open and send a `Event::State` on every change plus periodic heartbeats.
     Watch,
-    /// Put `client` on `target` and mark it as managed: it's detached when its tab closes, and
-    /// with `pin` it's sent back to its tab whenever it wanders off.
+    /// Put `client` on `target` and bind it there: it's detached when its tab closes, and with
+    /// `pin` it's sent back to its tab whenever it wanders off.
     Bind {
         client: ClientId,
         target: Target,
@@ -65,10 +65,6 @@ pub struct Tab {
 pub struct Client {
     pub id: ClientId,
     pub tab: TabId,
-    /// Bound by `warpify attach`. Filled in by the CLI from its registry; the plugin always
-    /// reports `false`.
-    #[serde(default)]
-    pub managed: bool,
 }
 
 impl State {
@@ -87,9 +83,43 @@ impl State {
     }
 }
 
+/// The tab name without the suffix zellij appends to a single-pane tab whose held pane has
+/// exited: ` [ EXITED ] ` or ` [ EXIT CODE: n ] ` (zellij-server 0.45.1, `tab/mod.rs`
+/// `single_pane_tab_name`). Names are compared stripped, on both sides of the wire.
+#[must_use]
+pub fn base_tab_name(name: &str) -> &str {
+    if let Some(base) = name.strip_suffix(" [ EXITED ] ") {
+        return base;
+    }
+    if let Some(head) = name.strip_suffix(" ] ") {
+        if let Some((base, code)) = head.rsplit_once(" [ EXIT CODE: ") {
+            if code.parse::<i32>().is_ok() {
+                return base;
+            }
+        }
+    }
+    name
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_tab_name_strips_the_exit_suffix() {
+        assert_eq!(base_tab_name("logs [ EXITED ] "), "logs");
+        assert_eq!(base_tab_name("logs [ EXIT CODE: 1 ] "), "logs");
+        assert_eq!(base_tab_name("logs [ EXIT CODE: -9 ] "), "logs");
+        assert_eq!(base_tab_name("a [ EXITED ]  [ EXITED ] "), "a [ EXITED ] ");
+    }
+
+    #[test]
+    fn base_tab_name_leaves_other_names_alone() {
+        assert_eq!(base_tab_name("logs"), "logs");
+        assert_eq!(base_tab_name(""), "");
+        assert_eq!(base_tab_name("[ EXITED ]"), "[ EXITED ]");
+        assert_eq!(base_tab_name("x [ EXIT CODE: ? ] "), "x [ EXIT CODE: ? ] ");
+    }
 
     #[test]
     fn request_wire_format() {

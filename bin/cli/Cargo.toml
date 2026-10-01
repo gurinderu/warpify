@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+tracing.workspace = true
 warpify-client.workspace = true
 warpify-proto.workspace = true
 warpify-telemetry.workspace = true

@@ -1,10 +1,12 @@
 //! `warpify` — talks to the warpify zellij plugin of a zellij session over `zellij pipe`.
 
 use std::io::{self, BufWriter, Write};
-use std::process::ExitCode;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, ExitCode, Stdio};
 
-use clap::{Parser, Subcommand};
-use warpify_proto::{Event, Request, State};
+use clap::{Args, Parser, Subcommand};
+use warpify_client::SessionTarget;
+use warpify_proto::{ClientId, Event, Request, State, TabId, Target};
 
 /// Talks to the warpify zellij plugin of a session (the current one, or --session) over
 /// `zellij pipe`. The plugin must already be loaded in the session (zellij config or layout).
@@ -27,6 +29,74 @@ enum Cmd {
     State,
     /// print the state on every change (heartbeats are silent)
     Watch,
+    /// move a client to a tab and bind it there
+    Bind {
+        /// the client to move (see `state`)
+        #[arg(long, value_name = "ID")]
+        client: ClientId,
+        #[command(flatten)]
+        target: TargetArgs,
+        /// send the client back to its tab whenever it wanders off
+        #[arg(long)]
+        pin: bool,
+    },
+    /// start a zellij client in a session (default `warpify`, created if missing) and bind it
+    #[command(mut_group("target", |g| g.required(false)))]
+    Attach {
+        #[command(flatten)]
+        target: TargetArgs,
+        /// send the client back to its tab whenever it wanders off
+        #[arg(long)]
+        pin: bool,
+    },
+    /// bind the next client that connects (spawned by `attach`)
+    #[command(name = "__bind-new", hide = true, mut_group("target", |g| g.required(false)))]
+    BindNew {
+        /// comma-separated ids of the clients already connected
+        #[arg(long, value_name = "IDS", default_value = "")]
+        known: String,
+        #[command(flatten)]
+        target: TargetArgs,
+        #[arg(long)]
+        pin: bool,
+    },
+}
+
+/// Where a bind puts the client; exactly one.
+#[derive(Args)]
+#[group(id = "target", required = true, multiple = false)]
+struct TargetArgs {
+    /// an existing tab by its id
+    #[arg(long, value_name = "ID")]
+    tab_id: Option<TabId>,
+    /// the tab with this name, created if missing
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// a fresh tab, optionally named
+    #[arg(long, value_name = "NAME", num_args = 0..=1, require_equals = false)]
+    new: Option<Vec<String>>,
+}
+
+impl TargetArgs {
+    /// The chosen target; a fresh unnamed tab when none was given (`attach`).
+    fn target(&self) -> Target {
+        match (self.tab_id, &self.name, &self.new) {
+            (Some(id), _, _) => Target::Id(id),
+            (_, Some(name), _) => Target::Name(name.clone()),
+            (_, _, Some(name)) => Target::New(name.first().cloned()),
+            _ => Target::New(None),
+        }
+    }
+}
+
+/// The flags that spell `target` for a re-run of this binary.
+fn target_flags(target: &Target) -> Vec<String> {
+    match target {
+        Target::Id(id) => vec!["--tab-id".into(), id.to_string()],
+        Target::Name(name) => vec![format!("--name={name}")],
+        Target::New(None) => vec!["--new".into()],
+        Target::New(Some(name)) => vec![format!("--new={name}")],
+    }
 }
 
 fn main() -> ExitCode {
@@ -36,14 +106,27 @@ fn main() -> ExitCode {
         1 => "debug",
         _ => "trace",
     };
-    warpify_telemetry::init(&format!(
-        "warpify={level},warpify_client={level},warpify_session={level}"
-    ));
-    let target = cli.session.map_or(
-        warpify_client::Target::Current,
-        warpify_client::Target::Named,
-    );
-    match run(&cli.command.into(), &target) {
+    if matches!(cli.command, Cmd::BindNew { .. }) {
+        init_helper_log(cli.verbose);
+    } else {
+        warpify_telemetry::init(&format!(
+            "warpify={level},warpify_client={level},warpify_session={level}"
+        ));
+    }
+    let result = match cli.command {
+        Cmd::State => run(&Request::State, &session_target(cli.session)),
+        Cmd::Watch => run(&Request::Watch, &session_target(cli.session)),
+        Cmd::Bind {
+            client,
+            target,
+            pin,
+        } => bind(&session_target(cli.session), client, &target.target(), pin),
+        Cmd::Attach { target, pin } => attach(cli.session.as_deref(), &target.target(), pin),
+        Cmd::BindNew { known, target, pin } => {
+            bind_new(cli.session.as_deref(), &known, &target.target(), pin)
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("warpify: {err}");
@@ -52,19 +135,115 @@ fn main() -> ExitCode {
     }
 }
 
-impl From<Cmd> for Request {
-    fn from(command: Cmd) -> Self {
-        match command {
-            Cmd::State => Request::State,
-            Cmd::Watch => Request::Watch,
+/// The helper has no terminal: its diagnostics (at least info) go to the attach log file.
+fn init_helper_log(verbose: u8) {
+    let level = match verbose {
+        0 => "info",
+        1 => "debug",
+        _ => "trace",
+    };
+    let filter = format!("warpify={level},warpify_client={level},warpify_session={level}");
+    match attach_log_path() {
+        Some(path) => {
+            if let Err(err) = warpify_telemetry::init_file(&filter, &path) {
+                eprintln!("warpify: can't open {}: {err}", path.display());
+            }
         }
+        None => warpify_telemetry::init(&filter),
     }
 }
 
-fn run(
-    request: &Request,
-    target: &warpify_client::Target,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn attach_log_path() -> Option<std::path::PathBuf> {
+    warpify_client::attach_log_path(
+        std::env::var("XDG_STATE_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+fn session_target(named: Option<String>) -> SessionTarget {
+    named.map_or(SessionTarget::Current, SessionTarget::Named)
+}
+
+type Outcome = Result<(), Box<dyn std::error::Error>>;
+
+fn bind(session: &SessionTarget, client: ClientId, target: &Target, pin: bool) -> Outcome {
+    let tab = warpify_client::bind_and_confirm(session, client, target, pin)?;
+    writeln!(
+        io::stdout(),
+        "client {client} is on tab \"{}\" (id {})",
+        tab.name,
+        tab.id
+    )?;
+    Ok(())
+}
+
+/// Snapshots the session's clients, starts the detached `__bind-new` helper, then becomes
+/// `zellij attach --create` (graph @nick/warpify, node #16).
+fn attach(session: Option<&str>, target: &Target, pin: bool) -> Outcome {
+    warpify_client::check_outside_zellij(std::env::var("ZELLIJ_SESSION_NAME").ok().as_deref())?;
+    let session = warpify_client::attach_session(session);
+    let known: Vec<String> =
+        match warpify_client::fetch_state(&SessionTarget::Named(session.into())) {
+            Ok(state) => state.clients.iter().map(|c| c.id.to_string()).collect(),
+            Err(err) => {
+                tracing::debug!(%err, "no state before attach; assuming no clients");
+                Vec::new()
+            }
+        };
+    let mut helper = Command::new(std::env::current_exe()?);
+    helper
+        .args(["__bind-new", "-s", session])
+        .arg(format!("--known={}", known.join(",")))
+        .args(target_flags(target))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    if pin {
+        helper.arg("--pin");
+    }
+    helper.spawn()?;
+    match attach_log_path() {
+        Some(path) => eprintln!(
+            "warpify: binding the new client in the background; log: {}",
+            path.display()
+        ),
+        None => eprintln!("warpify: binding the new client in the background; log: unavailable"),
+    }
+    let err = Command::new("zellij")
+        .args(["attach", "--create", session])
+        .exec();
+    Err(format!("can't run zellij: {err}").into())
+}
+
+/// The helper: waits for the new client, binds it and confirms; the verdict goes to the log.
+fn bind_new(session: Option<&str>, known: &str, target: &Target, pin: bool) -> Outcome {
+    let result = bind_new_inner(session, known, target, pin);
+    match &result {
+        Ok(line) => tracing::info!("{line}"),
+        Err(err) => tracing::error!("{err}"),
+    }
+    result.map(|_| ())
+}
+
+fn bind_new_inner(
+    session: Option<&str>,
+    known: &str,
+    target: &Target,
+    pin: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let session = SessionTarget::Named(warpify_client::attach_session(session).into());
+    let known = warpify_client::parse_known(known)?;
+    let client = warpify_client::wait_for_new_client(&session, &known)?;
+    tracing::debug!(client, "binding the new client");
+    let tab = warpify_client::bind_and_confirm(&session, client, target, pin)?;
+    Ok(format!(
+        "client {client} is on tab \"{}\" (id {})",
+        tab.name, tab.id
+    ))
+}
+
+fn run(request: &Request, target: &SessionTarget) -> Result<(), Box<dyn std::error::Error>> {
     let once = *request == Request::State;
     let mut changes = warpify_client::Changes::default();
     let mut out = BufWriter::new(io::stdout().lock());
@@ -148,6 +327,70 @@ mod tests {
     }
 
     #[test]
+    fn bind_needs_exactly_one_target() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["warpify", "bind", "--client", "2"].iter().chain(args))
+        };
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["--tab-id", "1", "--name", "x"]).is_err());
+        assert!(Cli::try_parse_from(["warpify", "bind", "--tab-id", "1"]).is_err());
+        let cli = parse(&["--new", "--pin"]).unwrap();
+        let Cmd::Bind { target, pin, .. } = cli.command else {
+            panic!("not bind")
+        };
+        assert!(pin);
+        assert_eq!(target.target(), Target::New(None));
+        let Cmd::Bind { target, .. } = parse(&["--new", "logs"]).unwrap().command else {
+            panic!("not bind")
+        };
+        assert_eq!(target.target(), Target::New(Some("logs".into())));
+        let Cmd::Bind { target, .. } = parse(&["--tab-id", "4"]).unwrap().command else {
+            panic!("not bind")
+        };
+        assert_eq!(target.target(), Target::Id(4));
+    }
+
+    #[test]
+    fn attach_target_is_optional_and_defaults_to_new() {
+        let Cmd::Attach { target, pin } =
+            Cli::try_parse_from(["warpify", "attach"]).unwrap().command
+        else {
+            panic!("not attach")
+        };
+        assert!(!pin);
+        assert_eq!(target.target(), Target::New(None));
+        assert!(Cli::try_parse_from(["warpify", "attach", "--name", "a", "--new"]).is_err());
+    }
+
+    #[test]
+    fn helper_flags_round_trip_even_for_names_starting_with_a_dash() {
+        for target in [
+            Target::Id(3),
+            Target::Name("a b".into()),
+            Target::Name("-x".into()),
+            Target::Name("--new".into()),
+            Target::New(None),
+            Target::New(Some("n".into())),
+            Target::New(Some("-n".into())),
+            Target::New(Some("--pin".into())),
+        ] {
+            let mut argv = vec!["warpify".to_owned(), "__bind-new".to_owned()];
+            argv.push("--known=1,2".into());
+            argv.extend(target_flags(&target));
+            let Cmd::BindNew {
+                known,
+                target: parsed,
+                ..
+            } = Cli::try_parse_from(argv).unwrap().command
+            else {
+                panic!("not bind-new")
+            };
+            assert_eq!(known, "1,2");
+            assert_eq!(parsed.target(), target);
+        }
+    }
+
+    #[test]
     fn parse_rejects_plugin_option() {
         assert!(Cli::try_parse_from(["warpify", "--plugin", "x", "state"]).is_err());
         assert!(Cli::try_parse_from(["warpify", "state", "--plugin"]).is_err());
@@ -168,18 +411,7 @@ mod tests {
                     name: "edit".into(),
                 },
             ],
-            clients: vec![
-                Client {
-                    id: 1,
-                    tab: 9,
-                    managed: false,
-                },
-                Client {
-                    id: 2,
-                    tab: 9,
-                    managed: false,
-                },
-            ],
+            clients: vec![Client { id: 1, tab: 9 }, Client { id: 2, tab: 9 }],
         };
         let mut buf = Vec::new();
         render(&state, &mut buf).unwrap();

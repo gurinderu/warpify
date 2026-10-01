@@ -2240,6 +2240,7 @@ name = "warpify-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "tracing",
  "warpify-client",
  "warpify-proto",
  "warpify-telemetry",
@@ -2278,6 +2279,8 @@ dependencies = [
 name = "warpify-session"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "warpify-proto",
 ]
 
