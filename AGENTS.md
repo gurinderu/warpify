@@ -165,7 +165,7 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 - **Pre-commit hook** (`.githooks/pre-commit`) runs fmt check and host clippy; not enabled — gate before push.
 - **Branch doesn't live without a PR**: pushed a branch — open a PR in the same move (draft if unfinished). Forge: GitHub, CLI `gh` (`gh pr checks <n> --watch`).
 - **Definition of done**: PR into `main` merged with the `ci` check green (`gh pr checks <n> --watch`).
-- **Releases**: never tag by hand; release-please opens the release PR, merging it publishes the release. Remove `release-as` from release-please-config.json after the first release.
+- **Releases**: never tag by hand; release-please opens the release PR, merging it publishes the release.
 - **Never** `--no-verify`, `--force`, `--no-gpg-sign`, `git reset --hard` without an explicit instruction.
 
 *(iskronify: contract 18, stamp 2026-10-01 — offer a re-run when the installed iskronify's description names a higher contract or when the sources this file was derived from moved after this date.)*
