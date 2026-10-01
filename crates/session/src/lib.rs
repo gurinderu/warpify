@@ -38,7 +38,9 @@ pub struct Snapshot {
     pub connected: bool,
     /// A `SessionUpdate` reported zero connected clients and the `ListClients` reply that
     /// confirms or refutes it is still awaited (a disk-scan `SessionUpdate` can carry a stale
-    /// zero).
+    /// zero). An empty `ListClients` is taken as "no clients", although zellij's list can miss a
+    /// client whose focused pane isn't in the layout dump (e.g. in the scrollback editor):
+    /// accepted residual risk (graph @nick/warpify, node #11).
     pub zero_pending: bool,
 }
 
@@ -290,6 +292,8 @@ impl Snapshot {
     pub fn apply_tabs(&mut self, tabs: Vec<TabSnapshot>) {
         self.tabs = tabs;
         self.connected = true;
+        // A tab update proves our own client is connected: a later empty list can't freeze.
+        self.zero_pending = false;
         if let Some(tab) = self.pending.as_ref().and_then(|p| p.resolve(&self.tabs)) {
             let pin = self.pending.take().is_some_and(|p| p.pin);
             self.binding = Some(Binding::new(tab, pin));
@@ -798,6 +802,17 @@ mod tests {
         assert!(!snap.on_client_list(2));
         assert!(snap.connected);
         assert!(!snap.zero_pending);
+    }
+
+    #[test]
+    fn tab_update_clears_pending_zero_so_empty_list_does_not_freeze() {
+        let mut snap = with_clients(1, &[]);
+        snap.on_zero_clients();
+        assert!(snap.zero_pending);
+        snap.apply_tabs(vec![named(3, "a", true)]);
+        assert!(!snap.zero_pending);
+        assert!(!snap.on_client_list(0));
+        assert!(snap.connected);
     }
 
     #[test]
