@@ -127,10 +127,11 @@ The carrier table is in `REALITY.md` at the root, read on occasion. Before sayin
 | format | `cargo fmt --all` |
 
 The workspace does not resolve yet: `crates/cli` has no `Cargo.toml` and `crates/plugin` has no `src/main.rs`, so the gate stays red until both exist.
-- Native builds need a C linker this machine lacks — run cargo under `nix shell nixpkgs#gcc -c …` (graph @nick/warpify, node #4).
+- Toolchain and C linker come from the flake devShell: `nix develop` (or direnv with `.envrc`), then cargo / `scripts/gate.sh` as usual; outside it native builds fail for lack of `cc` (graph @nick/warpify, node #4).
 - Pre-commit hook lives in `.githooks/`; enable per clone with `git config core.hooksPath .githooks`.
 
 ## Project structure
+- `flake.nix` / `.envrc` — devShell: Rust from `rust-toolchain.toml` via rust-overlay, plus the C linker.
 - `Cargo.toml` — workspace; members `crates/proto`, `crates/plugin`, `crates/cli`; default members exclude the plugin (it targets wasm). Release profile is size-optimized (`opt-level = "s"`, LTO, strip).
 - `crates/proto` — `warpify-proto`: wire types shared by plugin and CLI (`Request`, `Target`, `Event`, `State`); pipe name `warpify`, NDJSON replies, heartbeat on `watch`.
 - `crates/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`.
