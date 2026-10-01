@@ -34,6 +34,7 @@ pub fn merge_permissions(text: &str, wasm: &Path, perms: &[&str]) -> Result<Opti
         for p in perms {
             add_child(&mut node, p);
         }
+        node.fmt();
         append_node(&mut doc, node);
         changed = true;
     }

@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::config::edit_install;
 use crate::{Error, Paths, Result};
 
 const REPO: &str = "https://github.com/gurinderu/warpify";
@@ -122,9 +123,13 @@ pub fn load_entry(wasm: &Path) -> Result<String> {
         .ok_or_else(|| Error::new("the plugin path is not valid UTF-8"))
 }
 
-fn snippet(entry: &str) -> String {
-    // Multi-line: zellij's KDL (v1) wants a `;` or newline before `}`, so the one-line form fails.
-    format!("load_plugins {{\n    \"{entry}\"\n}}")
+/// The block to paste by hand: what `edit_install` would add to a config without one, so the
+/// zellij defaults stay (multi-line: zellij's KDL v1 wants a newline before `}`).
+fn snippet(entry: &str) -> Result<String> {
+    Ok(edit_install("", entry)?
+        .unwrap_or_default()
+        .trim_end()
+        .to_owned())
 }
 
 fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<Action> {
@@ -139,7 +144,7 @@ fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<A
             entry,
         },
         ConfigAccess::Manual(why) => Action::Manual {
-            snippet: snippet(&entry),
+            snippet: snippet(&entry)?,
             why: why.clone(),
             adding,
         },
@@ -264,7 +269,7 @@ mod tests {
         assert!(adding);
         assert_eq!(
             snippet,
-            "load_plugins {\n    \"file:/d/warpify/warpify.wasm\"\n}"
+            "load_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify.wasm\"\n}"
         );
     }
 

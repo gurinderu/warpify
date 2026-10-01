@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::config::{edit_install, edit_uninstall};
-use crate::fsutil::{backup_once, read_optional, remove_if_exists, write_atomic};
+use crate::fsutil::{backup_once, backup_path, read_optional, remove_if_exists, write_atomic};
 use crate::permissions::{merge_permissions, remove_permissions};
 use crate::plan::{load_entry, Action, Plan};
 use crate::{verify_sha256, Error, Result};
@@ -69,8 +69,12 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
         Action::RemovePermissions { file, wasm } => {
             edit(file, "permissions", |t| remove_permissions(t, wasm))
         }
-        Action::AddLoadPlugin { file, entry } => edit_config(file, |t| edit_install(t, entry)),
-        Action::RemoveLoadPlugin { file, entry } => edit_config(file, |t| edit_uninstall(t, entry)),
+        Action::AddLoadPlugin { file, entry } => {
+            edit_config(file, true, |t| edit_install(t, entry))
+        }
+        Action::RemoveLoadPlugin { file, entry } => {
+            edit_config(file, false, |t| edit_uninstall(t, entry))
+        }
         Action::RemoveWasm { dest } => Ok(if remove_if_exists(dest)? {
             format!("removed {}", dest.display())
         } else {
@@ -106,21 +110,35 @@ fn edit(
     Ok(format!("updated {what} in {}", file.display()))
 }
 
-/// Like `edit`, with a one-time backup of the original.
-fn edit_config(file: &Path, change: impl FnOnce(&str) -> Result<Option<String>>) -> Result<String> {
+/// Like `edit`, for the zellij config. Install backs up an existing file once and says when it
+/// created the file; uninstall never backs up, and deletes a file that is empty once our entry
+/// is gone and has no backup (so warpify had created it).
+fn edit_config(
+    file: &Path,
+    installing: bool,
+    change: impl FnOnce(&str) -> Result<Option<String>>,
+) -> Result<String> {
     let current = read_optional(file)?;
     let Some(new) = change(current.as_deref().unwrap_or_default())? else {
         return Ok(format!("config {} already up to date", file.display()));
     };
-    let backup = backup_once(file)?;
+    if !installing && new.trim().is_empty() && !backup_path(file).exists() {
+        remove_if_exists(file)?;
+        return Ok(format!(
+            "removed config {} (warpify created it and nothing else was in it)",
+            file.display()
+        ));
+    }
+    let backup = if installing { backup_once(file)? } else { None };
     write_atomic(file, new.as_bytes())?;
-    Ok(match backup {
-        Some(b) => format!(
+    Ok(match (backup, current) {
+        (Some(b), _) => format!(
             "updated config {} (original saved as {})",
             file.display(),
             b.display()
         ),
-        None => format!("updated config {}", file.display()),
+        (None, None) => format!("created config {}", file.display()),
+        (None, Some(_)) => format!("updated config {}", file.display()),
     })
 }
 
@@ -228,8 +246,49 @@ mod tests {
         let entry = entry_for(&p.wasm).unwrap();
         assert_eq!(
             read(&p.config),
-            format!("load_plugins {{\n    \"{entry}\"\n}}\n")
+            format!("load_plugins {{\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"{entry}\"\n}}\n")
         );
+        assert!(!crate::fsutil::backup_path(&p.config).exists());
+    }
+
+    #[test]
+    fn uninstall_deletes_a_config_the_installer_created_and_makes_no_backup() {
+        let (t, p) = sandbox();
+        let local = t.path().join("l.wasm");
+        std::fs::write(&local, b"w").unwrap();
+        let none = Fake(HashMap::new(), RefCell::default());
+        let first = execute(
+            &plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap(),
+            &none,
+        )
+        .unwrap();
+        assert!(first[2].starts_with("created config"), "{first:?}");
+        let out = execute(&plan_uninstall(&p, &ConfigAccess::Editable).unwrap(), &none).unwrap();
+        assert!(out[0].starts_with("removed config"), "{out:?}");
+        assert!(!p.config.exists());
+        assert!(!crate::fsutil::backup_path(&p.config).exists());
+    }
+
+    #[test]
+    fn uninstall_keeps_an_existing_file_and_never_makes_a_backup() {
+        let (t, p) = sandbox();
+        let local = t.path().join("l.wasm");
+        std::fs::write(&local, b"w").unwrap();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "").unwrap(); // existing but empty: still the user's
+        let none = Fake(HashMap::new(), RefCell::default());
+        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
+        execute(&plan, &none).unwrap();
+        std::fs::remove_file(crate::fsutil::backup_path(&p.config)).unwrap();
+        execute(&plan_uninstall(&p, &ConfigAccess::Editable).unwrap(), &none).unwrap();
+        assert!(!p.config.exists(), "no backup left means we created it");
+        std::fs::write(&p.config, "a 1\n").unwrap();
+        execute(&plan, &none).unwrap();
+        let bak = crate::fsutil::backup_path(&p.config);
+        std::fs::remove_file(&bak).unwrap();
+        execute(&plan_uninstall(&p, &ConfigAccess::Editable).unwrap(), &none).unwrap();
+        assert_eq!(read(&p.config).trim_end(), "a 1");
+        assert!(!bak.exists());
     }
 
     #[test]
@@ -241,7 +300,7 @@ mod tests {
         let plan = plan_install(&p, &Source::Local(local), &access).unwrap();
         let lines = execute(&plan, &Fake(HashMap::new(), RefCell::default())).unwrap();
         assert!(
-            lines[2].contains("load_plugins {\n    \"file:"),
+            lines[2].contains("\"zellij:link\"\n    \"file:"),
             "{lines:?}"
         );
         assert!(!p.config.exists());

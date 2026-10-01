@@ -1,6 +1,7 @@
 //! The warpify zellij plugin: answers `warpify-proto` requests arriving on the `warpify` pipe.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
@@ -27,55 +28,26 @@ struct Warpify {
 
 register_plugin!(Warpify);
 
-/// What `load` requests, paired with the names in `warpify_proto::PERMISSIONS` — the installer
-/// pre-grants those names, so the two lists must agree (checked at compile time below).
-const REQUESTED: [(&str, PermissionType); 4] = [
-    ("ReadApplicationState", PermissionType::ReadApplicationState),
-    (
-        "ChangeApplicationState",
-        PermissionType::ChangeApplicationState,
-    ),
-    ("ReadCliPipes", PermissionType::ReadCliPipes),
-    (
-        "MessageAndLaunchOtherPlugins",
-        PermissionType::MessageAndLaunchOtherPlugins,
-    ),
-];
-
-const fn names_match() -> bool {
-    if REQUESTED.len() != warpify_proto::PERMISSIONS.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < REQUESTED.len() {
-        let (a, b) = (
-            REQUESTED[i].0.as_bytes(),
-            warpify_proto::PERMISSIONS[i].as_bytes(),
-        );
-        if a.len() != b.len() {
-            return false;
-        }
-        let mut j = 0;
-        while j < a.len() {
-            if a[j] != b[j] {
-                return false;
+/// What `load` requests: the names in `warpify_proto::PERMISSIONS`, parsed by zellij's own
+/// `PermissionType::from_str`. The installer pre-grants the same names; an unknown one is logged
+/// and skipped.
+fn requested_permissions() -> Vec<PermissionType> {
+    warpify_proto::PERMISSIONS
+        .iter()
+        .filter_map(|name| {
+            let parsed = PermissionType::from_str(name);
+            if parsed.is_err() {
+                tracing::error!(name, "unknown zellij permission in PERMISSIONS, skipping");
             }
-            j += 1;
-        }
-        i += 1;
-    }
-    true
+            parsed.ok()
+        })
+        .collect()
 }
-
-const _: () = assert!(
-    names_match(),
-    "bin/plugin REQUESTED and warpify_proto::PERMISSIONS must list the same permissions in order"
-);
 
 impl ZellijPlugin for Warpify {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
         warpify_telemetry::init("warpify=info");
-        request_permission(&REQUESTED.map(|(_, permission)| permission));
+        request_permission(&requested_permissions());
         subscribe(&[
             EventType::TabUpdate,
             // Reaches frozen instances too; reports 0 connected clients once the last client

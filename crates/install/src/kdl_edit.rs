@@ -49,9 +49,8 @@ pub(crate) fn add_child(parent: &mut KdlNode, name: &str) {
     }
 }
 
-/// Appends `node` after everything already in `doc`, separated by a blank line.
+/// Appends `node` as it is (call `fmt` first for a fresh one) after everything already in `doc`, separated by a blank line.
 pub(crate) fn append_node(doc: &mut KdlDocument, mut node: KdlNode) {
-    node.fmt();
     let tail = doc.trailing().unwrap_or_default().to_owned();
     doc.set_trailing("");
     let body = format!("{doc}{tail}");

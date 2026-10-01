@@ -5,6 +5,7 @@ The graph models the work, the repo is part of its embodiment; this file names t
 |---|---|---|---|
 | Plugin/CLI behaviour (tabs and clients listed, client bound to a tab, `watch` stream) | the release `.wasm` loaded into a live zellij 0.45.1 session, driven by the built `warpify` binary | the agent hands over exact steps (build commands, how to load the plugin, which `warpify` calls to run, what to expect); the owner runs them and reports what they saw | user |
 | Wire format between CLI and plugin | `warpify-proto` serde output | `cargo test -p warpify-proto` — exact-JSON assertions | agent |
+| `install`/`uninstall` file effects (wasm placed, `permissions.kdl` merged, `config.kdl` edited or snippet printed, clean revert) | the files the built `warpify` writes under a sandboxed HOME | `T=$(mktemp -d)`; run `warpify install zellij --wasm <local build>` then `uninstall zellij` with `HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `ZELLIJ_CONFIG_DIR` all inside `$T`; inspect the files. Never against the real home. That zellij then loads the plugin without a prompt is the behaviour row above | agent |
 | Code compiles and is lint-clean | build artefacts from `scripts/gate.sh` | `scripts/gate.sh` (inside `nix develop`) and the `ci` check on the PR | agent |
 
 **Ceiling**: the agent cannot observe live zellij behaviour itself — a behavioural claim stays unverified until the owner reports the observation; never close it from tests or source.
