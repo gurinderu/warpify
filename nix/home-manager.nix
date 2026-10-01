@@ -51,18 +51,21 @@ in
       force = true;
     };
 
-    warnings = lib.optional
-      (config.programs.zellij.enable
-        && !(lib.hasPrefix "${builtFor}." config.programs.zellij.package.version))
-      "warpify's zellij plugin is built for zellij ${builtFor}; programs.zellij.package is ${config.programs.zellij.package.version} — the plugin may not load";
+    warnings =
+      lib.optional (!config.programs.zellij.enable)
+        "programs.warpify needs programs.zellij.enable = true: home-manager only writes zellij's config.kdl (and so load_plugins) when zellij is enabled"
+      ++ lib.optional
+        (config.programs.zellij.enable
+          && !(lib.hasPrefix "${builtFor}." config.programs.zellij.package.version))
+        "warpify's zellij plugin is built for zellij ${builtFor}; programs.zellij.package is ${config.programs.zellij.package.version} — the plugin may not load";
 
     # load_plugins replaces zellij's defaults, so zellij:link is repeated here.
     programs.zellij.settings.load_plugins = node "zellij:link" // node "file:${wasm}";
 
-    home.activation.warpifyGrantPermissions = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    home.activation.warpifyGrantPermissions = lib.mkIf config.programs.zellij.enable (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       # Never break `home-manager switch` over this: zellij asks on first load instead.
       run ${cfg.package}/bin/warpify __grant-permissions zellij --wasm-path ${lib.escapeShellArg wasm} \
         || warnEcho "warpify: couldn't grant the plugin's permissions (see above); zellij will ask on first load"
-    '';
+    '');
   };
 }

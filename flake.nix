@@ -18,7 +18,6 @@
   outputs = { self, nixpkgs, home-manager, rust-overlay, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      linux = [ "x86_64-linux" "aarch64-linux" ];
       forSystems = list: f: nixpkgs.lib.genAttrs list (system:
         f (import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; }));
       forAllSystems = forSystems systems;
@@ -51,7 +50,7 @@
         warpify = module;
       };
 
-      checks = forSystems linux (pkgs:
+      checks = forAllSystems (pkgs:
         import ./nix/checks.nix {
           inherit pkgs home-manager;
           packages = self.packages.${pkgs.stdenv.hostPlatform.system};

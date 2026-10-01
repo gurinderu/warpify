@@ -9,7 +9,7 @@ let
     then "Library/Application Support/warpify/warpify-zellij.wasm"
     else ".local/share/warpify/warpify-zellij.wasm";
   abs = "/home/tester/${rel}";
-  hm = home-manager.lib.homeManagerConfiguration {
+  mkHm = extra: home-manager.lib.homeManagerConfiguration {
     inherit pkgs;
     modules = [
       module
@@ -19,11 +19,15 @@ let
           homeDirectory = "/home/tester";
           stateVersion = "25.11";
         };
-        programs.zellij.enable = true;
         programs.warpify.enable = true;
       }
+      extra
     ];
   };
+  hm = mkHm { programs.zellij.enable = true; };
+  # zellij disabled: home-manager writes no config.kdl, so the module must warn and not grant.
+  hmNoZellij = mkHm { programs.zellij.enable = false; };
+  zellijWarning = "programs.warpify needs programs.zellij.enable = true: home-manager only writes zellij's config.kdl (and so load_plugins) when zellij is enabled";
 in
 {
   inherit (packages) warpify warpify-zellij;
@@ -44,6 +48,13 @@ in
     grep -F "zellij will ask on first load" ${hm.activationPackage}/activate
     # the other OS's location is not used
     test ! -e ${lib.escapeShellArg "${hm.config.home-files}/${if pkgs.stdenv.hostPlatform.isDarwin then ".local/share/warpify" else "Library"}"}
+    touch $out
+  '';
+
+  home-manager-module-no-zellij = pkgs.runCommand "warpify-hm-module-no-zellij-check" { } ''
+    ${if builtins.elem zellijWarning hmNoZellij.config.warnings then "" else "echo ${lib.escapeShellArg (toString hmNoZellij.config.warnings)}; exit 1"}
+    # no grant without a zellij config to load the plugin from
+    ! grep -F __grant-permissions ${hmNoZellij.activationPackage}/activate
     touch $out
   '';
 }
