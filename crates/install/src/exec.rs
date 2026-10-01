@@ -83,12 +83,8 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
             entry,
             why,
             adding,
-        } => Ok(manual_advice(
-            read_optional(file)?.as_deref(),
-            entry,
-            *adding,
-            why,
-        )),
+            seen,
+        } => Ok(manual_advice(file, seen, entry, *adding, why)),
     }
 }
 
@@ -190,7 +186,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::plan::{plan_install, plan_uninstall, ConfigAccess, Source};
+    use crate::plan::{plan_install, plan_uninstall, ConfigAccess, Seen, Source};
     use crate::Paths;
 
     struct Fake(HashMap<String, Vec<u8>>, RefCell<Vec<String>>);
@@ -359,12 +355,19 @@ mod tests {
         assert_eq!(read(&p.permissions), other);
     }
 
+    fn manual(why: &str, seen: Seen) -> ConfigAccess {
+        ConfigAccess::Manual {
+            why: why.into(),
+            seen,
+        }
+    }
+
     #[test]
     fn manual_access_touches_no_config() {
         let (t, p) = sandbox();
         let local = t.path().join("l.wasm");
         std::fs::write(&local, b"w").unwrap();
-        let access = ConfigAccess::Manual("nix".into());
+        let access = manual("nix", Seen::Missing);
         let plan = plan_install(&p, &Source::Local(local), &access).unwrap();
         let lines = execute(&plan, &Fake(HashMap::new(), RefCell::default())).unwrap();
         assert!(
@@ -379,13 +382,16 @@ mod tests {
         let (t, p) = sandbox();
         let local = t.path().join("l.wasm");
         std::fs::write(&local, b"w").unwrap();
-        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
-        std::fs::write(&p.config, "load_plugins {\n    \"zellij:link\"\n}\n").unwrap();
         let none = Fake(HashMap::new(), RefCell::default());
-        let access = ConfigAccess::Manual("nix".into());
         let entry = entry_for(&p.wasm).unwrap();
+        let held = "load_plugins {\n    \"zellij:link\"\n}\n";
         let add = execute(
-            &plan_install(&p, &Source::Local(local), &access).unwrap(),
+            &plan_install(
+                &p,
+                &Source::Local(local),
+                &manual("nix", Seen::Text(held.into())),
+            )
+            .unwrap(),
             &none,
         )
         .unwrap()
@@ -397,16 +403,107 @@ mod tests {
             "{add}"
         );
         assert!(!add.contains("zellij:link"), "{add}");
-        let rm = execute(&plan_uninstall(&p, &access).unwrap(), &none)
-            .unwrap()
-            .remove(0);
+        let ours = format!("load_plugins {{\n    \"zellij:link\"\n    \"{entry}\"\n}}\n");
+        let rm = execute(
+            &plan_uninstall(&p, &manual("nix", Seen::Text(ours))).unwrap(),
+            &none,
+        )
+        .unwrap()
+        .remove(0);
         assert!(
             rm.starts_with(&format!(
                 "remove this line from your load_plugins block: \"{entry}\""
             )),
             "{rm}"
         );
-        assert_eq!(read(&p.config), "load_plugins {\n    \"zellij:link\"\n}\n");
+        assert!(!p.config.exists());
+    }
+
+    #[test]
+    fn manual_uninstall_keeps_the_wasm_while_our_entry_is_in_the_config() {
+        let (_t, p) = sandbox();
+        let none = Fake(HashMap::new(), RefCell::default());
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(p.wasm.parent().unwrap()).unwrap();
+        std::fs::write(&p.wasm, b"w").unwrap();
+        let entry = entry_for(&p.wasm).unwrap();
+        let with = format!("load_plugins {{\n    \"{entry}\"\n}}\n");
+        std::fs::write(&p.config, &with).unwrap();
+        std::fs::set_permissions(
+            &p.config,
+            std::os::unix::fs::PermissionsExt::from_mode(0o444),
+        )
+        .unwrap();
+        let access = crate::probe_config(&p.config);
+        assert!(matches!(access, ConfigAccess::Manual { .. }));
+        let plan = plan_uninstall(&p, &access).unwrap();
+        assert!(!plan
+            .actions
+            .iter()
+            .any(|a| matches!(a, Action::RemoveWasm { .. })));
+        let out = execute(&plan, &none).unwrap();
+        assert!(out[0].starts_with("remove this line"), "{out:?}");
+        assert!(
+            out[0].contains("run `warpify uninstall zellij` again"),
+            "{out:?}"
+        );
+        assert!(p.wasm.exists());
+        assert_eq!(read(&p.config), with);
+        // The user removes the line by hand; the second uninstall deletes the plugin file.
+        std::fs::set_permissions(
+            &p.config,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::write(&p.config, "load_plugins {\n    \"zellij:link\"\n}\n").unwrap();
+        std::fs::set_permissions(
+            &p.config,
+            std::os::unix::fs::PermissionsExt::from_mode(0o444),
+        )
+        .unwrap();
+        let access = crate::probe_config(&p.config);
+        let out = execute(&plan_uninstall(&p, &access).unwrap(), &none).unwrap();
+        assert!(
+            !out.iter().any(|l| l.contains("remove this line")),
+            "{out:?}"
+        );
+        assert!(!p.wasm.exists());
+    }
+
+    #[test]
+    fn unreadable_config_is_decided_in_the_plan_and_install_completes() {
+        use std::os::unix::fs::PermissionsExt;
+        let (t, p) = sandbox();
+        let local = t.path().join("l.wasm");
+        std::fs::write(&local, b"w").unwrap();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "a 1\n").unwrap();
+        std::fs::set_permissions(&p.config, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&p.config).is_ok() {
+            return; // root reads anything
+        }
+        let access = crate::probe_config(&p.config);
+        let ConfigAccess::Manual { seen, .. } = &access else {
+            panic!("{access:?}")
+        };
+        assert!(matches!(seen, Seen::Unreadable(_)), "{seen:?}");
+        let none = Fake(HashMap::new(), RefCell::default());
+        let plan = plan_install(&p, &Source::Local(local), &access).unwrap();
+        let out = execute(&plan, &none).unwrap();
+        assert!(p.wasm.exists() && p.permissions.exists());
+        let cfg = p.config.display().to_string();
+        assert!(
+            out[2].contains("add this block")
+                && out[2].contains(&format!("couldn't read {cfg}: "))
+                && out[2].contains("showing the full block"),
+            "{out:?}"
+        );
+        // Uninstall can't tell whether the line is there: advice, and the plugin file stays.
+        let plan = plan_uninstall(&p, &access).unwrap();
+        let out = execute(&plan, &none).unwrap();
+        assert!(out[0].contains("couldn't read"), "{out:?}");
+        assert!(p.wasm.exists());
+        std::fs::set_permissions(&p.config, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     fn read(p: &Path) -> String {

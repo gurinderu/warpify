@@ -1,8 +1,11 @@
 //! zellij's `config.kdl`: add or drop our entry in the top-level `load_plugins` block.
 
+use std::path::Path;
+
 use kdl::{KdlDocument, KdlNode};
 
 use crate::kdl_edit::{add_child, append_node, has_child, parse, remove_child};
+use crate::plan::Seen;
 use crate::Result;
 
 const BLOCK: &str = "load_plugins";
@@ -38,21 +41,59 @@ pub(crate) fn only_ours_left(before: &str, after: &str) -> bool {
             .all(|l| l.is_empty() || l == CREATED_MARKER || l == note)
 }
 
-/// What to tell a user whose config warpify must not edit: `text` is the file (`None`: there is
-/// none), `why` is why it is not editable. Adding to an existing `load_plugins` block is one line;
-/// without a block it is the whole block, zellij's defaults included.
-pub(crate) fn manual_advice(text: Option<&str>, entry: &str, adding: bool, why: &str) -> String {
+/// Whether `entry` is in the top-level `load_plugins` block of `text` (plain text search when it
+/// does not parse, so a broken file still counts as holding our line).
+pub(crate) fn lists_entry(text: &str, entry: &str) -> bool {
+    parse(text, WHAT).map_or_else(
+        |_| text.contains(entry),
+        |doc| doc.get(BLOCK).is_some_and(|b| has_child(b, entry)),
+    )
+}
+
+/// What to tell a user whose config warpify must not edit: `seen` is what the probe found in
+/// `file`, `why` is why it is not editable. Adding to an existing `load_plugins` block is one
+/// line; without a block (or without a readable file) it is the whole block, zellij's defaults
+/// included. Removing says to run uninstall again, because the plugin file stays meanwhile.
+pub(crate) fn manual_advice(
+    file: &Path,
+    seen: &Seen,
+    entry: &str,
+    adding: bool,
+    why: &str,
+) -> String {
     let line = format!("\"{entry}\"");
     let tail = format!("(it's managed outside warpify: {why})");
+    let again = "then run `warpify uninstall zellij` again to delete the plugin file";
     if !adding {
-        return format!("remove this line from your load_plugins block: {line} {tail}");
+        return match seen {
+            Seen::Unreadable(e) => format!(
+                "if {line} is in your load_plugins block, remove it, {again} (couldn't read {}: {e})",
+                file.display()
+            ),
+            _ => format!("remove this line from your load_plugins block: {line}, {again} {tail}"),
+        };
     }
-    let doc = match text.map(|t| parse(t, WHAT)) {
-        Some(Ok(doc)) => doc,
-        Some(Err(e)) => {
-            return format!("{line}\nadd this line inside your load_plugins block ({e}) {tail}")
+    let full_block = |note: &str| {
+        let block = edit_install("", entry).ok().flatten().unwrap_or_default();
+        format!(
+            "{}\nadd this block to your zellij config (load_plugins replaces zellij's defaults, so they are in it) {note}",
+            block.trim_end()
+        )
+    };
+    let doc = match seen {
+        Seen::Unreadable(e) => {
+            return full_block(&format!(
+                "(couldn't read {}: {e}; showing the full block)",
+                file.display()
+            ))
         }
-        None => KdlDocument::new(),
+        Seen::Missing => KdlDocument::new(),
+        Seen::Text(t) => match parse(t, WHAT) {
+            Ok(doc) => doc,
+            Err(e) => {
+                return format!("{line}\nadd this line inside your load_plugins block ({e}) {tail}")
+            }
+        },
     };
     match doc.get(BLOCK) {
         Some(block) if has_child(block, entry) => {
@@ -61,13 +102,7 @@ pub(crate) fn manual_advice(text: Option<&str>, entry: &str, adding: bool, why: 
         Some(_) => {
             format!("{line}\nadd this line inside your existing load_plugins block {tail}")
         }
-        None => {
-            let block = edit_install("", entry).ok().flatten().unwrap_or_default();
-            format!(
-                "{}\nadd this block to your zellij config (load_plugins replaces zellij's defaults, so they are in it) {tail}",
-                block.trim_end()
-            )
-        }
+        None => full_block(&tail),
     }
 }
 
@@ -106,9 +141,32 @@ pub fn edit_uninstall(text: &str, entry: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     if is_ours_alone(block) {
-        doc.nodes_mut().retain(|n| n.name().value() != BLOCK);
+        drop_block(&mut doc);
     }
     Ok(Some(doc.to_string()))
+}
+
+/// Removes the `load_plugins` node, handing the text that preceded it (comments the user had
+/// after their last node, which install moved into the node's leading) to what follows. Last in
+/// the file, the one newline install put between that text and the block goes too.
+fn drop_block(doc: &mut KdlDocument) {
+    let Some(at) = doc.nodes().iter().position(|n| n.name().value() == BLOCK) else {
+        return;
+    };
+    let lead = doc
+        .nodes_mut()
+        .remove(at)
+        .leading()
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(next) = doc.nodes_mut().get_mut(at) {
+        let joined = format!("{lead}{}", next.leading().unwrap_or_default());
+        next.set_leading(joined);
+    } else {
+        let keep = lead.strip_suffix('\n').unwrap_or(&lead);
+        let joined = format!("{keep}{}", doc.trailing().unwrap_or_default());
+        doc.set_trailing(joined);
+    }
 }
 
 /// The block is empty, or is what `defaults_block` made (our note, only default entries).
@@ -190,21 +248,27 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_restores_the_original_bytes_exactly_and_drops_our_block() {
-        for base in ["// c\na 1\n", "a 1\n", ""] {
+    fn uninstall_restores_the_original_bytes_exactly() {
+        // Inputs that end in a newline (or are empty) come back byte for byte.
+        for base in [
+            "// c\na 1\n",
+            "a 1\n",
+            "",
+            "// only a comment\n",
+            "a 1\n// tail\n",
+        ] {
             let installed = edit_install(base, E).unwrap().unwrap();
             let removed = edit_uninstall(&installed, E).unwrap().unwrap();
             assert_eq!(removed, base, "{removed:?}");
         }
-        // The one inexact case: KDL needs the last line terminated, so install added a newline
-        // and uninstall can't tell it from one the user wrote (a blank line before a block is
-        // theirs to keep).
+    }
+
+    #[test]
+    fn uninstall_adds_the_missing_final_newline() {
+        // KDL needs the last line terminated, so install added a newline and uninstall can't
+        // tell it from one the user wrote (a blank line before a block is theirs to keep).
         let installed = edit_install("a 1", E).unwrap().unwrap();
         assert_eq!(edit_uninstall(&installed, E).unwrap().unwrap(), "a 1\n");
-        assert_eq!(
-            edit_uninstall(&edit_install("", E).unwrap().unwrap(), E).unwrap(),
-            Some(String::new())
-        );
     }
 
     #[test]
@@ -246,9 +310,11 @@ mod tests {
 
     #[test]
     fn manual_advice_follows_the_config() {
-        let add = |t: Option<&str>| manual_advice(t, E, true, "nix");
+        let f = Path::new("/c/config.kdl");
+        let text = |t: &str| Seen::Text(t.to_owned());
+        let add = |s: &Seen| manual_advice(f, s, E, true, "nix");
         let line = format!("\"{E}\"");
-        let with_block = add(Some("load_plugins {\n    \"zellij:link\"\n}\n"));
+        let with_block = add(&text("load_plugins {\n    \"zellij:link\"\n}\n"));
         assert!(
             with_block.starts_with(&format!(
                 "{line}\nadd this line inside your existing load_plugins block"
@@ -256,24 +322,52 @@ mod tests {
             "{with_block}"
         );
         assert!(!with_block.contains("zellij:link"), "{with_block}");
-        for t in [None, Some("a 1\n")] {
-            let out = add(t);
+        for s in [Seen::Missing, text("a 1\n")] {
+            let out = add(&s);
             assert!(out.starts_with(NEW_BLOCK.trim_end()), "{out}");
             assert!(out.contains("add this block"), "{out}");
         }
-        let present = add(Some(NEW_BLOCK));
+        let present = add(&text(NEW_BLOCK));
         assert!(present.contains("nothing to add"), "{present}");
-        let broken = add(Some("load_plugins {"));
+        let broken = add(&text("load_plugins {"));
         assert!(
             broken.starts_with(&line) && broken.contains("not valid KDL"),
             "{broken}"
         );
-        let rm = manual_advice(Some(NEW_BLOCK), E, false, "nix");
+        let rm = manual_advice(f, &text(NEW_BLOCK), E, false, "nix");
         assert_eq!(
             rm,
-            format!("remove this line from your load_plugins block: {line} (it's managed outside warpify: nix)")
+            format!("remove this line from your load_plugins block: {line}, then run `warpify uninstall zellij` again to delete the plugin file (it's managed outside warpify: nix)")
         );
         assert!(!rm.contains("block itself"), "{rm}");
+    }
+
+    #[test]
+    fn unreadable_config_gets_the_full_block_and_the_reason() {
+        let f = Path::new("/c/config.kdl");
+        let seen = Seen::Unreadable("Permission denied".into());
+        let add = manual_advice(f, &seen, E, true, "it is read-only");
+        assert!(add.starts_with(NEW_BLOCK.trim_end()), "{add}");
+        assert!(
+            add.ends_with(
+                "(couldn't read /c/config.kdl: Permission denied; showing the full block)"
+            ),
+            "{add}"
+        );
+        let rm = manual_advice(f, &seen, E, false, "it is read-only");
+        assert!(
+            rm.starts_with("if \"file:/d/warpify/warpify.wasm\" is in your load_plugins block")
+                && rm.contains("couldn't read /c/config.kdl: Permission denied"),
+            "{rm}"
+        );
+    }
+
+    #[test]
+    fn lists_entry_looks_inside_load_plugins_only() {
+        assert!(lists_entry(NEW_BLOCK, E));
+        assert!(!lists_entry("load_plugins {\n    \"zellij:link\"\n}\n", E));
+        assert!(!lists_entry(&format!("other \"{E}\"\n"), E));
+        assert!(lists_entry(&format!("load_plugins {{ \"{E}\""), E));
     }
 
     #[test]

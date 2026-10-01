@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::config::lists_entry;
 use crate::{Error, Paths, Result};
 
 const REPO: &str = "https://github.com/gurinderu/warpify";
@@ -23,12 +24,35 @@ pub enum Source {
     Local(PathBuf),
 }
 
+/// What the probe saw in the zellij config file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    Missing,
+    Text(String),
+    /// The file exists but reading it failed; holds the error.
+    Unreadable(String),
+}
+
+impl Seen {
+    fn of(config: &Path) -> Self {
+        match std::fs::read_to_string(config) {
+            Ok(text) => Self::Text(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Missing,
+            Err(e) => Self::Unreadable(e.to_string()),
+        }
+    }
+}
+
 /// Whether warpify may edit the zellij config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigAccess {
     Editable,
-    /// Managed elsewhere (nix store, read-only): the user does it by hand.
-    Manual(String),
+    /// Managed elsewhere (nix store, read-only) or unreadable: the user does it by hand, advised
+    /// from what `seen` holds.
+    Manual {
+        why: String,
+        seen: Seen,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,13 +85,14 @@ pub enum Action {
         file: PathBuf,
         entry: String,
     },
-    /// The config can't be edited here: executing reads `file` and prints the advice for
-    /// `entry`; `adding` says which way it goes.
+    /// The config can't be edited here: executing prints the advice for `entry` from what the
+    /// probe `seen` in `file`; `adding` says which way it goes.
     Manual {
         file: PathBuf,
         entry: String,
         why: String,
         adding: bool,
+        seen: Seen,
     },
 }
 
@@ -135,11 +160,12 @@ fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<A
             file: paths.config.clone(),
             entry,
         },
-        ConfigAccess::Manual(why) => Action::Manual {
+        ConfigAccess::Manual { why, seen } => Action::Manual {
             file: paths.config.clone(),
             entry,
             why: why.clone(),
             adding,
+            seen: seen.clone(),
         },
     })
 }
@@ -170,28 +196,48 @@ pub fn plan_install(paths: &Paths, source: &Source, access: &ConfigAccess) -> Re
     })
 }
 
+/// Uninstall by hand keeps the plugin file while the config may still load it: advice and no
+/// `RemoveWasm` when our entry is in the config (or the config can't be read); nothing to
+/// advise, and the file goes, when it is not.
+///
 /// # Errors
 /// When the plugin path is not valid UTF-8.
 pub fn plan_uninstall(paths: &Paths, access: &ConfigAccess) -> Result<Plan> {
-    Ok(Plan {
-        actions: vec![
-            config_action(paths, access, false)?,
-            Action::RemovePermissions {
-                file: paths.permissions.clone(),
-                wasm: paths.wasm.clone(),
-            },
-            Action::RemoveWasm {
-                dest: paths.wasm.clone(),
-            },
-        ],
-    })
+    let entry = load_entry(&paths.wasm)?;
+    let (config, keep_wasm) = match access {
+        ConfigAccess::Manual { seen, .. } if !entry_may_be_in(seen, &entry) => (None, false),
+        ConfigAccess::Manual { .. } => (Some(config_action(paths, access, false)?), true),
+        ConfigAccess::Editable => (Some(config_action(paths, access, false)?), false),
+    };
+    let mut actions: Vec<Action> = config.into_iter().collect();
+    actions.push(Action::RemovePermissions {
+        file: paths.permissions.clone(),
+        wasm: paths.wasm.clone(),
+    });
+    if !keep_wasm {
+        actions.push(Action::RemoveWasm {
+            dest: paths.wasm.clone(),
+        });
+    }
+    Ok(Plan { actions })
+}
+
+fn entry_may_be_in(seen: &Seen, entry: &str) -> bool {
+    match seen {
+        Seen::Missing => false,
+        Seen::Text(text) => lists_entry(text, entry),
+        Seen::Unreadable(_) => true,
+    }
 }
 
 /// Looks at the config file and decides whether we may edit it: not a symlink into the nix
-/// store, not read-only, and (when missing) its nearest existing directory is writable.
+/// store, not read-only, readable, and (when missing) its nearest existing directory is writable.
 #[must_use]
 pub fn probe_config(config: &Path) -> ConfigAccess {
-    let manual = |why: &str| ConfigAccess::Manual(why.to_owned());
+    let manual = |why: &str| ConfigAccess::Manual {
+        why: why.to_owned(),
+        seen: Seen::of(config),
+    };
     if let Ok(real) = std::fs::canonicalize(config) {
         let linked = std::fs::symlink_metadata(config).is_ok_and(|m| m.file_type().is_symlink());
         if linked && real.starts_with(NIX_STORE) {
@@ -199,6 +245,7 @@ pub fn probe_config(config: &Path) -> ConfigAccess {
         }
         return match std::fs::metadata(&real) {
             Ok(m) if m.permissions().readonly() => manual("it is read-only"),
+            _ if matches!(Seen::of(config), Seen::Unreadable(_)) => manual("it can't be read"),
             _ => ConfigAccess::Editable,
         };
     }
@@ -250,7 +297,10 @@ mod tests {
         let plan = plan_install(
             &paths(),
             &Source::Local("/w.wasm".into()),
-            &ConfigAccess::Manual("nix".into()),
+            &ConfigAccess::Manual {
+                why: "nix".into(),
+                seen: Seen::Missing,
+            },
         )
         .unwrap();
         assert_eq!(
@@ -260,6 +310,7 @@ mod tests {
                 entry: "file:/d/warpify/warpify.wasm".into(),
                 why: "nix".into(),
                 adding: true,
+                seen: Seen::Missing,
             }
         );
     }
@@ -282,7 +333,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let link = t.path().join("config.kdl");
         std::os::unix::fs::symlink(target.path(), &link).unwrap();
-        let ConfigAccess::Manual(why) = probe_config(&link) else {
+        let ConfigAccess::Manual { why, .. } = probe_config(&link) else {
             panic!("editable")
         };
         assert!(why.contains("/nix/store"), "{why}");
@@ -300,13 +351,13 @@ mod tests {
         std::fs::write(&f, "").unwrap();
         assert_eq!(probe_config(&f), ConfigAccess::Editable);
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
-        assert!(matches!(probe_config(&f), ConfigAccess::Manual(_)));
+        assert!(matches!(probe_config(&f), ConfigAccess::Manual { .. }));
         let ro = t.path().join("ro");
         std::fs::create_dir(&ro).unwrap();
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
         assert!(matches!(
             probe_config(&ro.join("config.kdl")),
-            ConfigAccess::Manual(_)
+            ConfigAccess::Manual { .. }
         ));
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
