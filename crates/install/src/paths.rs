@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use directories::{BaseDirs, ProjectDirs};
 
+use crate::plan::{LEGACY_PLUGIN_FILE, PLUGIN_FILE};
 use crate::{Error, Result};
 
 /// The environment variables zellij itself reads for its config; passed in so resolution stays
@@ -76,6 +77,8 @@ impl Dirs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub wasm: PathBuf,
+    /// Where 0.1.0 put the plugin (`LEGACY_PLUGIN_FILE`); cleaned up on install and uninstall.
+    pub legacy_wasm: PathBuf,
     pub config: PathBuf,
     pub permissions: PathBuf,
 }
@@ -97,7 +100,8 @@ impl Paths {
                 .join("config.kdl")
         };
         Ok(Self {
-            wasm: dirs.warpify_data.join("warpify.wasm"),
+            wasm: dirs.warpify_data.join(PLUGIN_FILE),
+            legacy_wasm: dirs.warpify_data.join(LEGACY_PLUGIN_FILE),
             config,
             permissions: dirs.zellij_cache.join("permissions.kdl"),
         })
@@ -121,7 +125,8 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let p = Paths::resolve(&EnvVars::default(), &dirs(t.path())).unwrap();
         assert_eq!(p.config, t.path().join("home/.config/zellij/config.kdl"));
-        assert_eq!(p.wasm, t.path().join("data/warpify/warpify.wasm"));
+        assert_eq!(p.wasm, t.path().join("data/warpify/warpify-zellij.wasm"));
+        assert_eq!(p.legacy_wasm, t.path().join("data/warpify/warpify.wasm"));
         assert_eq!(p.permissions, t.path().join("cache/zellij/permissions.kdl"));
     }
 

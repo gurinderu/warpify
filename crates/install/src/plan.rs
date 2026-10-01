@@ -9,6 +9,11 @@ use crate::{Error, Paths, Result};
 const REPO: &str = "https://github.com/gurinderu/warpify";
 const NIX_STORE: &str = "/nix/store";
 
+/// The plugin artifact: the release asset (its checksum is `<this>.sha256`) and the installed file.
+pub const PLUGIN_FILE: &str = "warpify-zellij.wasm";
+/// What 0.1.0 called it; install and uninstall clean it up.
+pub const LEGACY_PLUGIN_FILE: &str = "warpify.wasm";
+
 /// URL of a release asset for the CLI's own version.
 #[must_use]
 pub fn release_url(version: &str, file: &str) -> String {
@@ -85,6 +90,14 @@ pub enum Action {
         file: PathBuf,
         entry: String,
     },
+    /// Removes a 0.1.0 install if one is there: the file, its permissions entry and its
+    /// `load_plugins` line (by hand: advice to remove it).
+    RemoveLegacy {
+        wasm: PathBuf,
+        permissions: PathBuf,
+        config: LegacyConfig,
+        entry: String,
+    },
     /// The config can't be edited here: executing prints the advice for `entry` from what the
     /// probe `seen` in `file`; `adding` says which way it goes.
     Manual {
@@ -122,6 +135,9 @@ impl fmt::Display for Action {
                     file.display()
                 )
             }
+            Self::RemoveLegacy { wasm, .. } => {
+                write!(f, "clean up the 0.1.0 plugin {} if present", wasm.display())
+            }
             Self::Manual { adding, .. } => {
                 let verb = if *adding { "add" } else { "remove" };
                 write!(
@@ -131,6 +147,13 @@ impl fmt::Display for Action {
             }
         }
     }
+}
+
+/// What to do about the 0.1.0 line in the zellij config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyConfig {
+    Edit(PathBuf),
+    ByHand { file: PathBuf, seen: Seen },
 }
 
 /// An ordered list of actions.
@@ -170,13 +193,28 @@ fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<A
     })
 }
 
+fn legacy_action(paths: &Paths, access: &ConfigAccess) -> Result<Action> {
+    Ok(Action::RemoveLegacy {
+        wasm: paths.legacy_wasm.clone(),
+        permissions: paths.permissions.clone(),
+        config: match access {
+            ConfigAccess::Editable => LegacyConfig::Edit(paths.config.clone()),
+            ConfigAccess::Manual { seen, .. } => LegacyConfig::ByHand {
+                file: paths.config.clone(),
+                seen: seen.clone(),
+            },
+        },
+        entry: load_entry(&paths.legacy_wasm)?,
+    })
+}
+
 /// # Errors
 /// When the plugin path is not valid UTF-8.
 pub fn plan_install(paths: &Paths, source: &Source, access: &ConfigAccess) -> Result<Plan> {
     let wasm = match source {
         Source::Release { version } => Action::FetchWasm {
-            url: release_url(version, "warpify.wasm"),
-            sha_url: release_url(version, "warpify.wasm.sha256"),
+            url: release_url(version, PLUGIN_FILE),
+            sha_url: release_url(version, &format!("{PLUGIN_FILE}.sha256")),
             dest: paths.wasm.clone(),
         },
         Source::Local(from) => Action::CopyWasm {
@@ -192,6 +230,7 @@ pub fn plan_install(paths: &Paths, source: &Source, access: &ConfigAccess) -> Re
                 wasm: paths.wasm.clone(),
             },
             config_action(paths, access, true)?,
+            legacy_action(paths, access)?,
         ],
     })
 }
@@ -219,10 +258,11 @@ pub fn plan_uninstall(paths: &Paths, access: &ConfigAccess) -> Result<Plan> {
             dest: paths.wasm.clone(),
         });
     }
+    actions.push(legacy_action(paths, access)?);
     Ok(Plan { actions })
 }
 
-fn entry_may_be_in(seen: &Seen, entry: &str) -> bool {
+pub(crate) fn entry_may_be_in(seen: &Seen, entry: &str) -> bool {
     match seen {
         Seen::Missing => false,
         Seen::Text(text) => lists_entry(text, entry),
@@ -264,7 +304,8 @@ mod tests {
 
     fn paths() -> Paths {
         Paths {
-            wasm: "/d/warpify/warpify.wasm".into(),
+            wasm: "/d/warpify/warpify-zellij.wasm".into(),
+            legacy_wasm: "/d/warpify/warpify.wasm".into(),
             config: "/c/config.kdl".into(),
             permissions: "/k/permissions.kdl".into(),
         }
@@ -273,8 +314,8 @@ mod tests {
     #[test]
     fn release_urls_follow_the_version() {
         assert_eq!(
-            release_url("0.1.0", "warpify.wasm.sha256"),
-            "https://github.com/gurinderu/warpify/releases/download/v0.1.0/warpify.wasm.sha256"
+            release_url("0.1.0", "warpify-zellij.wasm.sha256"),
+            "https://github.com/gurinderu/warpify/releases/download/v0.1.0/warpify-zellij.wasm.sha256"
         );
     }
 
@@ -307,7 +348,7 @@ mod tests {
             plan.actions[2],
             Action::Manual {
                 file: "/c/config.kdl".into(),
-                entry: "file:/d/warpify/warpify.wasm".into(),
+                entry: "file:/d/warpify/warpify-zellij.wasm".into(),
                 why: "nix".into(),
                 adding: true,
                 seen: Seen::Missing,
@@ -320,6 +361,52 @@ mod tests {
         let plan = plan_uninstall(&paths(), &ConfigAccess::Editable).unwrap();
         assert!(matches!(plan.actions[0], Action::RemoveLoadPlugin { .. }));
         assert!(matches!(plan.actions[2], Action::RemoveWasm { .. }));
+    }
+
+    #[test]
+    fn both_plans_end_with_the_legacy_cleanup() {
+        let legacy = |plan: Plan| plan.actions.into_iter().last().unwrap();
+        let want = |config| Action::RemoveLegacy {
+            wasm: "/d/warpify/warpify.wasm".into(),
+            permissions: "/k/permissions.kdl".into(),
+            config,
+            entry: "file:/d/warpify/warpify.wasm".into(),
+        };
+        let edit = LegacyConfig::Edit("/c/config.kdl".into());
+        let local = Source::Local("/w.wasm".into());
+        let plan = plan_install(&paths(), &local, &ConfigAccess::Editable).unwrap();
+        assert_eq!(legacy(plan), want(edit.clone()));
+        let plan = plan_uninstall(&paths(), &ConfigAccess::Editable).unwrap();
+        assert_eq!(legacy(plan), want(edit));
+        let by_hand = ConfigAccess::Manual {
+            why: "nix".into(),
+            seen: Seen::Missing,
+        };
+        let plan = plan_uninstall(&paths(), &by_hand).unwrap();
+        let config = LegacyConfig::ByHand {
+            file: "/c/config.kdl".into(),
+            seen: Seen::Missing,
+        };
+        assert_eq!(legacy(plan), want(config));
+    }
+
+    #[test]
+    fn the_artifact_names_come_from_one_const() {
+        assert_eq!(PLUGIN_FILE, "warpify-zellij.wasm");
+        assert_ne!(PLUGIN_FILE, LEGACY_PLUGIN_FILE);
+        let rel = Source::Release {
+            version: "1.2.3".into(),
+        };
+        let plan = plan_install(&paths(), &rel, &ConfigAccess::Editable).unwrap();
+        let Action::FetchWasm { url, sha_url, dest } = &plan.actions[0] else {
+            panic!("{plan:?}")
+        };
+        assert!(url.ends_with("/v1.2.3/warpify-zellij.wasm"), "{url}");
+        assert!(
+            sha_url.ends_with("/v1.2.3/warpify-zellij.wasm.sha256"),
+            "{sha_url}"
+        );
+        assert!(dest.ends_with(PLUGIN_FILE));
     }
 
     #[test]

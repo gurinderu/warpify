@@ -43,7 +43,7 @@ mod tests {
     fn parses_bare_digest_and_sha256sum_format() {
         assert_eq!(parse_sha256_line(&format!("{ABC}\n")).unwrap(), ABC);
         assert_eq!(
-            parse_sha256_line(&format!("{}  warpify.wasm\n", ABC.to_uppercase())).unwrap(),
+            parse_sha256_line(&format!("{}  warpify-zellij.wasm\n", ABC.to_uppercase())).unwrap(),
             ABC
         );
     }
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn verifies_and_reports_mismatch() {
-        assert!(verify_sha256(b"abc", &format!("{ABC}  warpify.wasm")).is_ok());
+        assert!(verify_sha256(b"abc", &format!("{ABC}  warpify-zellij.wasm")).is_ok());
         let err = verify_sha256(b"abd", ABC).unwrap_err().to_string();
         assert!(err.contains("mismatch"), "{err}");
     }

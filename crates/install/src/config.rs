@@ -106,7 +106,7 @@ pub(crate) fn manual_advice(
     }
 }
 
-/// Adds `entry` (e.g. `file:/abs/warpify.wasm`) to `load_plugins`. A block that exists only gets
+/// Adds `entry` (e.g. `file:/abs/warpify-zellij.wasm`) to `load_plugins`. A block that exists only gets
 /// our child; when there is none it is created at the end with zellij's default entries too: new text, `None` when the entry is already there.
 ///
 /// # Errors
@@ -186,15 +186,15 @@ fn is_ours_alone(block: &KdlNode) -> bool {
 mod tests {
     use super::*;
 
-    const E: &str = "file:/d/warpify/warpify.wasm";
-    const NEW_BLOCK: &str = "load_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify.wasm\"\n}\n";
+    const E: &str = "file:/d/warpify/warpify-zellij.wasm";
+    const NEW_BLOCK: &str = "load_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\n";
     #[test]
     fn appends_a_block_when_there_is_none_and_keeps_the_rest() {
         let base = "// my config\nkeybinds {\n    normal {\n        bind \"Alt h\" { MoveFocus \"Left\"; }  // left\n    }\n}\n\ntheme   \"nord\" /* c */\n// tail\n";
         let out = edit_install(base, E).unwrap().unwrap();
         assert!(out.starts_with(base.trim_end_matches("// tail\n")), "{out}");
         assert!(
-            out.contains("// tail\n\nload_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify.wasm\"\n}\n"),
+            out.contains("// tail\n\nload_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\n"),
             "{out}"
         );
     }
@@ -205,7 +205,7 @@ mod tests {
         let out = edit_install(base, E).unwrap().unwrap();
         assert_eq!(
             out,
-            "a 1\nload_plugins {\n    // mine\n    \"file:/x.wasm\"\n    \"file:/d/warpify/warpify.wasm\"\n}\nb 2\n"
+            "a 1\nload_plugins {\n    // mine\n    \"file:/x.wasm\"\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\nb 2\n"
         );
     }
 
@@ -219,7 +219,10 @@ mod tests {
             let out = edit_install(base, E)
                 .unwrap_or_else(|e| panic!("{base:?}: {e}"))
                 .unwrap();
-            assert!(out.contains("\"file:/d/warpify/warpify.wasm\""), "{out}");
+            assert!(
+                out.contains("\"file:/d/warpify/warpify-zellij.wasm\""),
+                "{out}"
+            );
             assert!(edit_install(&out, E).unwrap().is_none(), "{out}");
             assert!(out.parse::<kdl::KdlDocument>().is_ok());
         }
@@ -282,7 +285,7 @@ mod tests {
     #[test]
     fn uninstall_keeps_other_plugins_and_the_block() {
         let base =
-            "load_plugins {\n    \"file:/x.wasm\"\n    \"file:/d/warpify/warpify.wasm\"\n}\n";
+            "load_plugins {\n    \"file:/x.wasm\"\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\n";
         let out = edit_uninstall(base, E).unwrap().unwrap();
         assert_eq!(out, "load_plugins {\n    \"file:/x.wasm\"\n}\n");
     }
@@ -356,8 +359,9 @@ mod tests {
         );
         let rm = manual_advice(f, &seen, E, false, "it is read-only");
         assert!(
-            rm.starts_with("if \"file:/d/warpify/warpify.wasm\" is in your load_plugins block")
-                && rm.contains("couldn't read /c/config.kdl: Permission denied"),
+            rm.starts_with(
+                "if \"file:/d/warpify/warpify-zellij.wasm\" is in your load_plugins block"
+            ) && rm.contains("couldn't read /c/config.kdl: Permission denied"),
             "{rm}"
         );
     }

@@ -62,7 +62,10 @@ fn finish(plan: &Plan, dry_run: bool, closing: &str) -> Outcome {
         }
         return Ok(());
     }
-    for line in execute(plan, &UreqFetcher)? {
+    for line in execute(plan, &UreqFetcher)?
+        .iter()
+        .filter(|l| !l.is_empty())
+    {
         writeln!(out, "{line}")?;
     }
     writeln!(out, "{closing}")?;
@@ -76,7 +79,8 @@ mod tests {
 
     fn paths() -> Paths {
         Paths {
-            wasm: "/d/warpify/warpify.wasm".into(),
+            wasm: "/d/warpify/warpify-zellij.wasm".into(),
+            legacy_wasm: "/d/warpify/warpify.wasm".into(),
             config: "/c/config.kdl".into(),
             permissions: "/k/permissions.kdl".into(),
         }
@@ -98,7 +102,7 @@ mod tests {
         assert_eq!(by_hand, INSTALLED_BY_HAND);
         assert!(by_hand.starts_with("after you add it, new zellij sessions"));
 
-        let ours = "load_plugins {\n    \"file:/d/warpify/warpify.wasm\"\n}\n";
+        let ours = "load_plugins {\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\n";
         let line = |a: &ConfigAccess| closing(&plan_uninstall(&paths(), a).unwrap(), false);
         assert_eq!(line(&ConfigAccess::Editable), UNINSTALLED);
         assert_eq!(line(&manual(Seen::Text(ours.into()))), UNINSTALL_PENDING);

@@ -41,9 +41,9 @@ jobs:
           shared-key: release
       - run: nix develop -c cargo build -p warpify-plugin --target wasm32-wasip1 --release
       - run: |
-          cp target/wasm32-wasip1/release/warpify.wasm warpify.wasm
-          sha256sum warpify.wasm > warpify.wasm.sha256
-      - run: gh release upload "$TAG" warpify.wasm warpify.wasm.sha256 --clobber
+          cp target/wasm32-wasip1/release/warpify-zellij.wasm warpify-zellij.wasm
+          sha256sum warpify-zellij.wasm > warpify-zellij.wasm.sha256
+      - run: gh release upload "$TAG" warpify-zellij.wasm warpify-zellij.wasm.sha256 --clobber
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}

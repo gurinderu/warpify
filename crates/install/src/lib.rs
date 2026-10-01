@@ -17,8 +17,8 @@ pub use exec::{entry_for, execute, Fetcher, UreqFetcher};
 pub use paths::{Dirs, EnvVars, Paths};
 pub use permissions::{merge_permissions, remove_permissions};
 pub use plan::{
-    plan_install, plan_uninstall, probe_config, release_url, Action, ConfigAccess, Plan, Seen,
-    Source,
+    plan_install, plan_uninstall, probe_config, release_url, Action, ConfigAccess, LegacyConfig,
+    Plan, Seen, Source, LEGACY_PLUGIN_FILE, PLUGIN_FILE,
 };
 
 use std::fmt;

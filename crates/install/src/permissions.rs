@@ -57,7 +57,7 @@ pub fn remove_permissions(text: &str, wasm: &Path) -> Result<Option<String>> {
 mod tests {
     use super::*;
 
-    const W: &str = "/d/warpify/warpify.wasm";
+    const W: &str = "/d/warpify/warpify-zellij.wasm";
     const P: &[&str] = &["ReadApplicationState", "ReadCliPipes"];
 
     fn merged(text: &str) -> String {
@@ -68,7 +68,7 @@ mod tests {
     fn new_file_gets_one_entry() {
         assert_eq!(
             merged(""),
-            "\"/d/warpify/warpify.wasm\" {\n    ReadApplicationState\n    ReadCliPipes\n}\n"
+            "\"/d/warpify/warpify-zellij.wasm\" {\n    ReadApplicationState\n    ReadCliPipes\n}\n"
         );
     }
 
@@ -77,16 +77,16 @@ mod tests {
         let other = "\"/x/other.wasm\" {\n    ChangeApplicationState\n}\n";
         let out = merged(other);
         assert!(out.starts_with(other), "{out}");
-        assert!(out.contains("\"/d/warpify/warpify.wasm\" {"));
+        assert!(out.contains("\"/d/warpify/warpify-zellij.wasm\" {"));
     }
 
     #[test]
     fn existing_grants_are_unioned() {
-        let before = "\"/d/warpify/warpify.wasm\" {\n    ReadCliPipes\n    OpenFiles\n}\n";
+        let before = "\"/d/warpify/warpify-zellij.wasm\" {\n    ReadCliPipes\n    OpenFiles\n}\n";
         let out = merged(before);
         assert_eq!(
             out,
-            "\"/d/warpify/warpify.wasm\" {\n    ReadCliPipes\n    OpenFiles\n    ReadApplicationState\n}\n"
+            "\"/d/warpify/warpify-zellij.wasm\" {\n    ReadCliPipes\n    OpenFiles\n    ReadApplicationState\n}\n"
         );
         assert!(merge_permissions(&out, Path::new(W), P).unwrap().is_none());
     }
