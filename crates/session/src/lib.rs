@@ -36,14 +36,11 @@ pub struct Snapshot {
     /// and still pipes every message to it, but no tab update reaches it until a client takes
     /// the id again. A frozen instance stays silent (graph @nick/warpify, node #9, risk #12).
     pub connected: bool,
-    /// When the last `TabUpdate` arrived, in milliseconds on the plugin's monotonic clock.
-    pub last_tab_update_ms: Option<u64>,
+    /// A `SessionUpdate` reported zero connected clients and the `ListClients` reply that
+    /// confirms or refutes it is still awaited (a disk-scan `SessionUpdate` can carry a stale
+    /// zero).
+    pub zero_pending: bool,
 }
-
-/// A `SessionUpdate` reporting no connected clients is ignored for this long after a
-/// `TabUpdate`: it can come from a disk scan with a stale count, while a `TabUpdate` is
-/// live evidence that a client is there.
-pub const STALE_ZERO_WINDOW_MS: u64 = 2_000;
 
 impl Default for Snapshot {
     fn default() -> Self {
@@ -53,7 +50,7 @@ impl Default for Snapshot {
             binding: None,
             pending: None,
             connected: true,
-            last_tab_update_ms: None,
+            zero_pending: false,
         }
     }
 }
@@ -283,15 +280,15 @@ impl Snapshot {
     /// this id again.
     pub fn freeze(&mut self) {
         self.connected = false;
+        self.zero_pending = false;
         self.binding = None;
         self.pending = None;
     }
 
     /// A tab update arrived, so a client holds this id: un-freeze (a fresh start, the binding
     /// stays cleared) and adopt a pending bind whose tab the client is now on.
-    pub fn apply_tabs(&mut self, tabs: Vec<TabSnapshot>, now_ms: u64) {
+    pub fn apply_tabs(&mut self, tabs: Vec<TabSnapshot>) {
         self.tabs = tabs;
-        self.last_tab_update_ms = Some(now_ms);
         self.connected = true;
         if let Some(tab) = self.pending.as_ref().and_then(|p| p.resolve(&self.tabs)) {
             let pin = self.pending.take().is_some_and(|p| p.pin);
@@ -299,14 +296,25 @@ impl Snapshot {
         }
     }
 
-    /// Whether a `SessionUpdate` reporting zero connected clients should freeze this instance:
-    /// not if a `TabUpdate` arrived less than [`STALE_ZERO_WINDOW_MS`] before `now_ms`.
-    #[must_use]
-    pub fn should_freeze_on_zero(&self, now_ms: u64) -> bool {
-        self.connected
-            && self
-                .last_tab_update_ms
-                .is_none_or(|at| now_ms.saturating_sub(at) >= STALE_ZERO_WINDOW_MS)
+    /// A `SessionUpdate` reported zero connected clients: whether to ask `list_clients` to
+    /// confirm. A frozen instance has nothing left to freeze, so it doesn't ask.
+    pub fn on_zero_clients(&mut self) -> bool {
+        self.zero_pending = self.connected;
+        self.zero_pending
+    }
+
+    /// The `ListClients` reply arrived: freezes the instance and returns true only if a zero is
+    /// pending and the list is empty. A non-empty list refutes the zero; either way the pending
+    /// flag is cleared, and a reply nobody asked for does nothing.
+    pub fn on_client_list(&mut self, client_count: usize) -> bool {
+        if !std::mem::take(&mut self.zero_pending) {
+            return false;
+        }
+        let freeze = client_count == 0 && self.connected;
+        if freeze {
+            self.freeze();
+        }
+        freeze
     }
 
     /// Record the outcome of a bind step: the tab zellij returned is the binding, no tab (the
@@ -689,7 +697,7 @@ mod tests {
     fn tab_update_unfreezes_without_a_binding() {
         let (_, mut snap) = bound(9, true, vec![named(9, "b", true)]);
         snap.freeze();
-        snap.apply_tabs(vec![named(3, "a", true), named(9, "b", false)], 0);
+        snap.apply_tabs(vec![named(3, "a", true), named(9, "b", false)]);
         assert!(snap.connected);
         assert_eq!(snap.binding, None);
         assert!(snap.is_leader());
@@ -712,12 +720,12 @@ mod tests {
         snap.finish_bind(&BindStep::FocusOrCreate("z".into()), true, None);
         assert_eq!(snap.binding, None);
         // Still on "a": not yet.
-        snap.apply_tabs(vec![named(3, "a", true)], 0);
+        snap.apply_tabs(vec![named(3, "a", true)]);
         assert_eq!(snap.binding, None);
         // Another tab named "z" that the client isn't on: not yet.
-        snap.apply_tabs(vec![named(3, "a", true), named(5, "z", false)], 0);
+        snap.apply_tabs(vec![named(3, "a", true), named(5, "z", false)]);
         assert_eq!(snap.binding, None);
-        snap.apply_tabs(vec![named(3, "a", false), named(5, "z", true)], 0);
+        snap.apply_tabs(vec![named(3, "a", false), named(5, "z", true)]);
         assert_eq!(snap.binding, Some(Binding::new(5, true)));
         assert_eq!(snap.pending, None);
     }
@@ -728,9 +736,9 @@ mod tests {
         snap.tabs = vec![named(3, "a", true)];
         snap.finish_bind(&BindStep::CreateNew(None), false, None);
         // The old active tab is not the new one.
-        snap.apply_tabs(vec![named(3, "a", true)], 0);
+        snap.apply_tabs(vec![named(3, "a", true)]);
         assert_eq!(snap.binding, None);
-        snap.apply_tabs(vec![named(3, "a", false), named(8, "Tab #2", true)], 0);
+        snap.apply_tabs(vec![named(3, "a", false), named(8, "Tab #2", true)]);
         assert_eq!(snap.binding, Some(Binding::new(8, false)));
     }
 
@@ -754,7 +762,7 @@ mod tests {
         snap.finish_bind(&BindStep::GoTo(3), true, Some(3));
         assert_eq!(snap.binding.map(|b| b.seen), Some(true));
         // The next update, with the client drifted away, is pulled back.
-        snap.apply_tabs(vec![named(3, "a", false), named(5, "b", true)], 0);
+        snap.apply_tabs(vec![named(3, "a", false), named(5, "b", true)]);
         assert_eq!(on_tabs(snap.binding, &snap), Some(Correction::GoTo(3)));
     }
 
@@ -767,21 +775,45 @@ mod tests {
     }
 
     #[test]
-    fn zero_clients_is_ignored_right_after_a_tab_update() {
+    fn zero_clients_sets_pending_and_asks() {
         let mut snap = with_clients(1, &[]);
-        assert!(snap.should_freeze_on_zero(0), "no tab update yet");
-        snap.apply_tabs(vec![named(3, "a", true)], 10_000);
-        assert!(!snap.should_freeze_on_zero(10_000));
-        assert!(!snap.should_freeze_on_zero(11_999));
-        assert!(snap.should_freeze_on_zero(12_000));
-        assert!(snap.should_freeze_on_zero(60_000));
+        assert!(snap.on_zero_clients());
+        assert!(snap.zero_pending);
+        assert!(snap.connected, "not frozen until the list confirms");
     }
 
     #[test]
-    fn frozen_instance_does_not_freeze_again() {
+    fn pending_zero_with_empty_list_freezes() {
+        let mut snap = with_clients(1, &[]);
+        snap.on_zero_clients();
+        assert!(snap.on_client_list(0));
+        assert!(!snap.connected);
+        assert!(!snap.zero_pending);
+    }
+
+    #[test]
+    fn pending_zero_with_non_empty_list_is_ignored_and_cleared() {
+        let mut snap = with_clients(1, &[]);
+        snap.on_zero_clients();
+        assert!(!snap.on_client_list(2));
+        assert!(snap.connected);
+        assert!(!snap.zero_pending);
+    }
+
+    #[test]
+    fn client_list_without_pending_does_nothing() {
+        let mut snap = with_clients(1, &[]);
+        assert!(!snap.on_client_list(0));
+        assert!(snap.connected);
+    }
+
+    #[test]
+    fn frozen_instance_ignores_zero() {
         let mut snap = with_clients(1, &[]);
         snap.freeze();
-        assert!(!snap.should_freeze_on_zero(60_000));
+        assert!(!snap.on_zero_clients());
+        assert!(!snap.zero_pending);
+        assert!(!snap.on_client_list(0));
     }
 
     #[test]

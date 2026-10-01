@@ -1,7 +1,6 @@
 //! The warpify zellij plugin: answers `warpify-proto` requests arriving on the `warpify` pipe.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
 
 use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
@@ -24,9 +23,6 @@ struct Warpify {
     /// Clients of the previous `TabUpdate`, to notice departures (graph @nick/warpify, node #9,
     /// risk #12).
     known_clients: BTreeSet<ClientId>,
-    /// Monotonic clock origin for the session's millisecond timestamps; `Instant` works on
-    /// `wasm32-wasip1` (WASI `clock_time_get`) and can't go backwards, unlike `SystemTime`.
-    started: Option<Instant>,
 }
 
 register_plugin!(Warpify);
@@ -46,11 +42,14 @@ impl ZellijPlugin for Warpify {
             // Reaches frozen instances too; reports 0 connected clients once the last client
             // has left (zellij-server `screen.rs` `remove_client`).
             EventType::SessionUpdate,
+            // Confirms a zero in `SessionUpdate`; the reply is addressed by (plugin, client) and
+            // reaches a departed client's instance (zellij-server `plugins/mod.rs`
+            // `ListClientsToPlugin`).
+            EventType::ListClients,
             EventType::Timer,
             EventType::PermissionRequestResult,
         ]);
         set_selectable(false);
-        self.started = Some(Instant::now());
         self.session.own_client = get_plugin_ids().client_id;
         set_timeout(HEARTBEAT_SECS);
     }
@@ -58,9 +57,8 @@ impl ZellijPlugin for Warpify {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::TabUpdate(tabs) => {
-                let now = self.now_ms();
                 self.session
-                    .apply_tabs(tabs.iter().map(tab_snapshot).collect(), now);
+                    .apply_tabs(tabs.iter().map(tab_snapshot).collect());
                 self.announce_departures();
                 self.correct_binding();
                 self.broadcast_if_changed();
@@ -69,8 +67,17 @@ impl ZellijPlugin for Warpify {
                 let empty = sessions
                     .iter()
                     .any(|s| s.is_current_session && s.connected_clients == 0);
-                // A disk-scan SessionUpdate may carry a stale zero: a fresh TabUpdate outweighs it.
-                if empty && self.session.should_freeze_on_zero(self.now_ms()) {
+                // A disk-scan SessionUpdate may carry a stale zero: the client list confirms it.
+                if empty && self.session.on_zero_clients() {
+                    tracing::debug!(
+                        client = self.session.own_client,
+                        "zero clients reported, confirming"
+                    );
+                    list_clients();
+                }
+            }
+            Event::ListClients(clients) => {
+                if self.session.on_client_list(clients.len()) {
                     tracing::info!(
                         client = self.session.own_client,
                         "no clients connected, freezing"
@@ -127,13 +134,6 @@ impl ZellijPlugin for Warpify {
 }
 
 impl Warpify {
-    /// Milliseconds since this instance loaded.
-    fn now_ms(&self) -> u64 {
-        self.started.map_or(0, |s| {
-            u64::try_from(s.elapsed().as_millis()).unwrap_or(u64::MAX)
-        })
-    }
-
     fn state(&self) -> State {
         self.session.state()
     }
