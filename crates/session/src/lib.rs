@@ -3,44 +3,31 @@
 
 use warpify_proto::{Client, ClientId, Request, State, Tab, TabId};
 
-/// A pane as zellij addresses it: terminal and plugin panes number independently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaneRef {
-    Terminal(u32),
-    Plugin(u32),
-}
-
+/// A tab as one plugin instance sees it in its own `TabUpdate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabSnapshot {
     pub id: TabId,
     pub position: usize,
     pub name: String,
+    /// The instance's own client is on this tab.
+    pub active: bool,
+    /// Every other connected client whose active tab is this one.
+    pub other_clients: Vec<ClientId>,
 }
 
-/// The panes of the tab at `tab_position`; zellij's pane manifest is keyed by position.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneSnapshot {
-    pub tab_position: usize,
-    pub panes: Vec<PaneRef>,
-}
-
-/// A connected client and the pane it is focused on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientSnapshot {
-    pub id: ClientId,
-    pub pane: PaneRef,
-}
-
-/// What the plugin currently knows about the session.
+/// What one plugin instance currently knows about the session.
+///
+/// Requires a non-mirrored session: in a mirrored one zellij reports no other clients, so only
+/// the instance's own client would show up.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
+    /// The client this instance belongs to.
+    pub own_client: ClientId,
     pub tabs: Vec<TabSnapshot>,
-    pub panes: Vec<PaneSnapshot>,
-    pub clients: Vec<ClientSnapshot>,
 }
 
 impl Snapshot {
-    /// The wire state; a client whose pane is in no known tab is left out.
+    /// The wire state, clients derived from the tabs.
     #[must_use]
     pub fn state(&self) -> State {
         let tabs = self
@@ -52,52 +39,50 @@ impl Snapshot {
                 name: t.name.clone(),
             })
             .collect();
-        let clients = self
-            .clients
-            .iter()
-            .filter_map(|c| {
-                Some(Client {
-                    id: c.id,
-                    tab: self.tab_of_pane(c.pane)?,
-                    managed: false,
-                })
-            })
-            .collect();
-        State { tabs, clients }
+        State {
+            tabs,
+            clients: self.clients(),
+        }
     }
 
-    /// The stable id of the tab holding `pane`.
-    fn tab_of_pane(&self, pane: PaneRef) -> Option<TabId> {
-        let position = self
-            .panes
-            .iter()
-            .find(|p| p.panes.contains(&pane))?
-            .tab_position;
-        self.tabs
-            .iter()
-            .find(|t| t.position == position)
-            .map(|t| t.id)
+    /// Connected clients with their tabs: the own client is on the active tab, the others on the
+    /// tab listing them. A client listed twice is reported once, on the first tab.
+    fn clients(&self) -> Vec<Client> {
+        let mut clients: Vec<Client> = Vec::new();
+        for tab in &self.tabs {
+            let own = tab.active.then_some(self.own_client);
+            for id in own.into_iter().chain(tab.other_clients.iter().copied()) {
+                if clients.iter().all(|c| c.id != id) {
+                    clients.push(Client {
+                        id,
+                        tab: tab.id,
+                        managed: false,
+                    });
+                }
+            }
+        }
+        clients
     }
 
-    /// The instance of the lowest connected client speaks for the session. With no client list
+    /// The instance of the lowest connected client speaks for the session. With no client known
     /// yet every instance does: a duplicate reply beats a CLI left hanging.
     #[must_use]
-    pub fn is_leader(&self, own_client: ClientId) -> bool {
-        self.clients
+    pub fn is_leader(&self) -> bool {
+        self.clients()
             .iter()
             .map(|c| c.id)
             .min()
-            .is_none_or(|leader| leader == own_client)
+            .is_none_or(|leader| leader == self.own_client)
     }
 
-    /// Whether the instance of `own_client` handles `request` (`None`: it didn't parse). A bind
-    /// is the named client's own instance's job; anything else is answered once, by the leader,
-    /// or the CLI would get a copy per client.
+    /// Whether this instance handles `request` (`None`: it didn't parse). A bind is the named
+    /// client's own instance's job; anything else is answered once, by the leader, or the CLI
+    /// would get a copy per client.
     #[must_use]
-    pub fn handles(&self, own_client: ClientId, request: Option<&Request>) -> bool {
+    pub fn handles(&self, request: Option<&Request>) -> bool {
         match request {
-            Some(Request::Bind { client, .. }) => *client == own_client,
-            _ => self.is_leader(own_client),
+            Some(Request::Bind { client, .. }) => *client == self.own_client,
+            _ => self.is_leader(),
         }
     }
 }
@@ -107,126 +92,97 @@ mod tests {
     use super::*;
     use warpify_proto::Target;
 
-    fn tab(id: TabId, position: usize) -> TabSnapshot {
+    fn tab(id: TabId, position: usize, active: bool, others: &[ClientId]) -> TabSnapshot {
         TabSnapshot {
             id,
             position,
             name: format!("t{id}"),
+            active,
+            other_clients: others.to_vec(),
         }
     }
 
-    fn client(id: ClientId, pane: PaneRef) -> ClientSnapshot {
-        ClientSnapshot { id, pane }
+    fn client(id: ClientId, tab: TabId) -> Client {
+        Client {
+            id,
+            tab,
+            managed: false,
+        }
     }
 
-    fn with_clients(ids: &[ClientId]) -> Snapshot {
+    /// A snapshot for `own_client` where it and `others` share one tab.
+    fn with_clients(own_client: ClientId, others: &[ClientId]) -> Snapshot {
         Snapshot {
-            clients: ids
-                .iter()
-                .map(|&id| client(id, PaneRef::Terminal(0)))
-                .collect(),
-            ..Snapshot::default()
+            own_client,
+            tabs: vec![tab(0, 0, true, others)],
         }
     }
 
     #[test]
-    fn client_maps_to_the_tab_holding_its_pane() {
+    fn own_client_is_on_the_active_tab() {
         let snap = Snapshot {
-            tabs: vec![tab(7, 0), tab(9, 1)],
-            panes: vec![
-                PaneSnapshot {
-                    tab_position: 0,
-                    panes: vec![PaneRef::Terminal(1)],
-                },
-                PaneSnapshot {
-                    tab_position: 1,
-                    panes: vec![PaneRef::Terminal(2), PaneRef::Terminal(3)],
-                },
-            ],
-            clients: vec![client(1, PaneRef::Terminal(3))],
+            own_client: 3,
+            tabs: vec![tab(7, 0, false, &[]), tab(9, 1, true, &[])],
         };
-        let state = snap.state();
-        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(snap.state().tabs.len(), 2);
+        assert_eq!(snap.state().clients, vec![client(3, 9)]);
+    }
+
+    #[test]
+    fn other_clients_are_on_the_tab_listing_them() {
+        let snap = Snapshot {
+            own_client: 1,
+            tabs: vec![tab(7, 0, true, &[4]), tab(9, 1, false, &[2, 5])],
+        };
         assert_eq!(
-            state.clients,
-            vec![Client {
-                id: 1,
-                tab: 9,
-                managed: false
-            }]
+            snap.state().clients,
+            vec![client(1, 7), client(4, 7), client(2, 9), client(5, 9)]
         );
     }
 
     #[test]
-    fn plugin_and_terminal_panes_with_the_same_id_differ() {
+    fn client_listed_on_two_tabs_is_reported_once() {
         let snap = Snapshot {
-            tabs: vec![tab(7, 0), tab(9, 1)],
-            panes: vec![
-                PaneSnapshot {
-                    tab_position: 0,
-                    panes: vec![PaneRef::Terminal(4)],
-                },
-                PaneSnapshot {
-                    tab_position: 1,
-                    panes: vec![PaneRef::Plugin(4)],
-                },
-            ],
-            clients: vec![
-                client(1, PaneRef::Terminal(4)),
-                client(2, PaneRef::Plugin(4)),
-            ],
+            own_client: 1,
+            tabs: vec![tab(7, 0, true, &[2]), tab(9, 1, false, &[2, 1])],
         };
-        let tabs: Vec<_> = snap.state().clients.iter().map(|c| c.tab).collect();
-        assert_eq!(tabs, [7, 9]);
+        assert_eq!(snap.state().clients, vec![client(1, 7), client(2, 7)]);
     }
 
     #[test]
-    fn client_with_unknown_pane_is_dropped() {
+    fn no_tabs_no_clients_and_this_instance_leads() {
         let snap = Snapshot {
-            tabs: vec![tab(7, 0)],
-            panes: vec![PaneSnapshot {
-                tab_position: 0,
-                panes: vec![PaneRef::Terminal(1)],
-            }],
-            clients: vec![client(1, PaneRef::Terminal(99))],
+            own_client: 3,
+            tabs: vec![],
         };
-        assert!(snap.state().clients.is_empty());
+        assert_eq!(snap.state().clients, vec![]);
+        assert!(snap.is_leader());
     }
 
     #[test]
     fn leader_is_the_lowest_client() {
-        let snap = with_clients(&[5, 2, 8]);
-        assert!(snap.is_leader(2));
-        assert!(!snap.is_leader(5));
-        assert!(!snap.is_leader(8));
-    }
-
-    #[test]
-    fn no_clients_every_instance_leads() {
-        let snap = Snapshot::default();
-        assert!(snap.is_leader(0));
-        assert!(snap.is_leader(3));
+        assert!(with_clients(2, &[5, 8]).is_leader());
+        assert!(!with_clients(5, &[2, 8]).is_leader());
+        assert!(!with_clients(8, &[5, 2]).is_leader());
     }
 
     #[test]
     fn bind_goes_only_to_the_named_clients_instance() {
-        let snap = with_clients(&[1, 2]);
         let bind = Request::Bind {
             client: 2,
             target: Target::Id(0),
             pin: false,
         };
         // Client 1 is the leader, yet a bind for client 2 is not its job.
-        assert!(!snap.handles(1, Some(&bind)));
-        assert!(snap.handles(2, Some(&bind)));
+        assert!(!with_clients(1, &[2]).handles(Some(&bind)));
+        assert!(with_clients(2, &[1]).handles(Some(&bind)));
     }
 
     #[test]
     fn other_requests_go_to_the_leader() {
-        let snap = with_clients(&[1, 2]);
         for request in [Some(&Request::State), Some(&Request::Watch), None] {
-            assert!(snap.handles(1, request));
-            assert!(!snap.handles(2, request));
+            assert!(with_clients(1, &[2]).handles(request));
+            assert!(!with_clients(2, &[1]).handles(request));
         }
     }
 }

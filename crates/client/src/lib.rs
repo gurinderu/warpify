@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use warpify_proto::{Event, Request, HEARTBEAT_SECS, PIPE_NAME};
+use warpify_proto::{Event, Request, State, HEARTBEAT_SECS, PIPE_NAME};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
@@ -30,10 +30,10 @@ impl fmt::Display for Error {
             Error::Zellij(msg) | Error::Reply(msg) => f.write_str(msg),
             Error::Silent { secs } => write!(
                 f,
-                "no reply from the warpify plugin for {secs} s — is it loaded in this session?"
+                "no reply from the warpify plugin for {secs} s — is the warpify plugin loaded in this session, and are its permissions granted?"
             ),
             Error::Closed => f.write_str(
-                "the pipe closed before the warpify plugin sent a state — is it loaded in this session?",
+                "the pipe closed before the warpify plugin sent a state — is the warpify plugin loaded in this session, and are its permissions granted?",
             ),
             Error::Exit(status) => write!(f, "zellij pipe exited with {status}"),
         }
@@ -41,6 +41,24 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Passes a state through only when it differs from the last one passed: several plugin
+/// instances may answer the same watch, and their identical states must print once.
+#[derive(Debug, Default)]
+pub struct Changes {
+    last: Option<State>,
+}
+
+impl Changes {
+    /// Whether `state` is new, remembering it if so.
+    pub fn is_new(&mut self, state: &State) -> bool {
+        if self.last.as_ref() == Some(state) {
+            return false;
+        }
+        self.last = Some(state.clone());
+        true
+    }
+}
 
 /// Sends `request` down the pipe and feeds each reply (heartbeats included) to `on_event` until it
 /// returns `false` or the pipe closes.
@@ -147,12 +165,29 @@ mod tests {
     }
 
     #[test]
+    fn changes_pass_only_differing_states() {
+        let state = |name: &str| State {
+            tabs: vec![warpify_proto::Tab {
+                id: 0,
+                position: 0,
+                name: name.into(),
+            }],
+            clients: vec![],
+        };
+        let mut changes = Changes::default();
+        assert!(changes.is_new(&state("a")));
+        assert!(!changes.is_new(&state("a")));
+        assert!(changes.is_new(&state("b")));
+        assert!(changes.is_new(&state("a")));
+    }
+
+    #[test]
     fn no_reply_errors_ask_whether_the_plugin_is_loaded() {
         assert!(Error::Silent { secs: 15.0 }
             .to_string()
-            .ends_with("is it loaded in this session?"));
+            .ends_with("are its permissions granted?"));
         assert!(Error::Closed
             .to_string()
-            .ends_with("is it loaded in this session?"));
+            .ends_with("are its permissions granted?"));
     }
 }

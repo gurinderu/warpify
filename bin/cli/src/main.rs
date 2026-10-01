@@ -44,9 +44,12 @@ impl From<Cmd> for Request {
 
 fn run(request: &Request) -> Result<(), warpify_client::Error> {
     let once = *request == Request::State;
+    let mut changes = warpify_client::Changes::default();
     warpify_client::stream(request, |event| {
         if let Event::State(state) = event {
-            print!("{}", render(state));
+            if changes.is_new(state) {
+                print!("{}", render(state));
+            }
             return !once;
         }
         true

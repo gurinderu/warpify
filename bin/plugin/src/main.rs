@@ -3,15 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use warpify_proto::{Event as WireEvent, Request, State, HEARTBEAT_SECS, PIPE_NAME};
-use warpify_session::{ClientSnapshot, PaneRef, PaneSnapshot, Snapshot, TabSnapshot};
+use warpify_session::{Snapshot, TabSnapshot};
 use zellij_tile::prelude::*;
 
 /// zellij runs one instance of this plugin per connected client and fans every pipe message out
 /// to all of them; an instance's tab switches move only its own client.
 #[derive(Default)]
 struct Warpify {
-    /// The client this instance belongs to.
-    own_client: ClientId,
     session: Snapshot,
     /// CLI pipes held open by `watch`, by pipe id. zellij gives no signal when a CLI watcher goes
     /// away, so ids of dead pipes stay here (graph @nick/warpify, node #11).
@@ -31,13 +29,11 @@ impl ZellijPlugin for Warpify {
         ]);
         subscribe(&[
             EventType::TabUpdate,
-            EventType::PaneUpdate,
-            EventType::ListClients,
             EventType::Timer,
             EventType::PermissionRequestResult,
         ]);
         set_selectable(false);
-        self.own_client = get_plugin_ids().client_id;
+        self.session.own_client = get_plugin_ids().client_id;
         set_timeout(HEARTBEAT_SECS);
     }
 
@@ -45,21 +41,10 @@ impl ZellijPlugin for Warpify {
         match event {
             Event::TabUpdate(tabs) => {
                 self.session.tabs = tabs.iter().map(tab_snapshot).collect();
-                list_clients();
-            }
-            Event::PaneUpdate(panes) => {
-                self.session.panes = panes.panes.iter().map(pane_snapshot).collect();
-                list_clients();
-            }
-            Event::ListClients(clients) => {
-                self.session.clients = clients.iter().map(client_snapshot).collect();
                 self.broadcast_if_changed();
             }
-            Event::PermissionRequestResult(_) => list_clients(),
             Event::Timer(_) => {
                 self.send_to_watchers(&WireEvent::Heartbeat);
-                // Clients aren't pushed by zellij; the heartbeat doubles as their poll.
-                list_clients();
                 set_timeout(HEARTBEAT_SECS);
             }
             _ => {}
@@ -80,7 +65,7 @@ impl ZellijPlugin for Warpify {
             return false;
         };
         let request = serde_json::from_str::<Request>(&payload);
-        let mine = self.session.handles(self.own_client, request.as_ref().ok());
+        let mine = self.session.handles(request.as_ref().ok());
         if !mine {
             return false;
         }
@@ -132,40 +117,12 @@ fn send(pipe_id: &str, event: &WireEvent) {
     }
 }
 
-fn pane_ref(id: PaneId) -> PaneRef {
-    match id {
-        PaneId::Terminal(id) => PaneRef::Terminal(id),
-        PaneId::Plugin(id) => PaneRef::Plugin(id),
-    }
-}
-
 fn tab_snapshot(tab: &TabInfo) -> TabSnapshot {
     TabSnapshot {
         id: tab.tab_id,
         position: tab.position,
         name: tab.name.clone(),
-    }
-}
-
-fn pane_snapshot((position, panes): (&usize, &Vec<PaneInfo>)) -> PaneSnapshot {
-    PaneSnapshot {
-        tab_position: *position,
-        panes: panes
-            .iter()
-            .map(|p| {
-                if p.is_plugin {
-                    PaneRef::Plugin(p.id)
-                } else {
-                    PaneRef::Terminal(p.id)
-                }
-            })
-            .collect(),
-    }
-}
-
-fn client_snapshot(client: &ClientInfo) -> ClientSnapshot {
-    ClientSnapshot {
-        id: client.client_id,
-        pane: pane_ref(client.pane_id),
+        active: tab.active,
+        other_clients: tab.other_focused_clients.clone(),
     }
 }
