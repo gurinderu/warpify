@@ -1,6 +1,7 @@
 //! Binding a client to a tab and `attach`'s helpers: the confirm predicate, picking a freshly
 //! connected client, and the polling around `state` (graph @nick/warpify, nodes #9, #16).
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use warpify_proto::{ClientId, Request, State, Tab, TabId, Target};
@@ -18,6 +19,20 @@ const NEW_CLIENT_WITHIN: Duration = Duration::from_secs(10);
 #[must_use]
 pub fn attach_session(named: Option<&str>) -> &str {
     named.unwrap_or(DEFAULT_SESSION)
+}
+
+/// Where the `attach` helper logs: `$XDG_STATE_HOME/warpify/attach.log`, else
+/// `$HOME/.local/state/warpify/attach.log`. Empty values count as unset; `None` if neither is.
+#[must_use]
+pub fn attach_log_path(xdg_state_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    fn non_empty(v: Option<&str>) -> Option<&str> {
+        v.filter(|v| !v.is_empty())
+    }
+    let base = match non_empty(xdg_state_home) {
+        Some(xdg) => PathBuf::from(xdg),
+        None => PathBuf::from(non_empty(home)?).join(".local/state"),
+    };
+    Some(base.join("warpify/attach.log"))
 }
 
 /// `attach` starts a zellij client, so it can't run from inside a session.
@@ -203,6 +218,25 @@ mod tests {
             Error::InsideSession("w".into()).to_string(),
             "already inside zellij session \"w\" — use bind instead"
         );
+    }
+
+    #[test]
+    fn log_path_prefers_xdg_state_home() {
+        let path = |xdg, home| attach_log_path(xdg, home);
+        assert_eq!(
+            path(Some("/x"), Some("/h")),
+            Some("/x/warpify/attach.log".into())
+        );
+        assert_eq!(
+            path(None, Some("/h")),
+            Some("/h/.local/state/warpify/attach.log".into())
+        );
+        assert_eq!(
+            path(Some(""), Some("/h")),
+            Some("/h/.local/state/warpify/attach.log".into())
+        );
+        assert_eq!(path(None, None), None);
+        assert_eq!(path(Some(""), Some("")), None);
     }
 
     #[test]

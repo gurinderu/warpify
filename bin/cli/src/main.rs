@@ -106,9 +106,13 @@ fn main() -> ExitCode {
         1 => "debug",
         _ => "trace",
     };
-    warpify_telemetry::init(&format!(
-        "warpify={level},warpify_client={level},warpify_session={level}"
-    ));
+    if matches!(cli.command, Cmd::BindNew { .. }) {
+        init_helper_log(cli.verbose);
+    } else {
+        warpify_telemetry::init(&format!(
+            "warpify={level},warpify_client={level},warpify_session={level}"
+        ));
+    }
     let result = match cli.command {
         Cmd::State => run(&Request::State, &session_target(cli.session)),
         Cmd::Watch => run(&Request::Watch, &session_target(cli.session)),
@@ -129,6 +133,31 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The helper has no terminal: its diagnostics (at least info) go to the attach log file.
+fn init_helper_log(verbose: u8) {
+    let level = match verbose {
+        0 => "info",
+        1 => "debug",
+        _ => "trace",
+    };
+    let filter = format!("warpify={level},warpify_client={level},warpify_session={level}");
+    match attach_log_path() {
+        Some(path) => {
+            if let Err(err) = warpify_telemetry::init_file(&filter, &path) {
+                eprintln!("warpify: can't open {}: {err}", path.display());
+            }
+        }
+        None => warpify_telemetry::init(&filter),
+    }
+}
+
+fn attach_log_path() -> Option<std::path::PathBuf> {
+    warpify_client::attach_log_path(
+        std::env::var("XDG_STATE_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 fn session_target(named: Option<String>) -> SessionTarget {
@@ -174,26 +203,44 @@ fn attach(session: Option<&str>, target: &Target, pin: bool) -> Outcome {
         helper.arg("--pin");
     }
     helper.spawn()?;
+    match attach_log_path() {
+        Some(path) => eprintln!(
+            "warpify: binding the new client in the background; log: {}",
+            path.display()
+        ),
+        None => eprintln!("warpify: binding the new client in the background; log: unavailable"),
+    }
     let err = Command::new("zellij")
         .args(["attach", "--create", session])
         .exec();
     Err(format!("can't run zellij: {err}").into())
 }
 
+/// The helper: waits for the new client, binds it and confirms; the verdict goes to the log.
 fn bind_new(session: Option<&str>, known: &str, target: &Target, pin: bool) -> Outcome {
+    let result = bind_new_inner(session, known, target, pin);
+    match &result {
+        Ok(line) => tracing::info!("{line}"),
+        Err(err) => tracing::error!("{err}"),
+    }
+    result.map(|_| ())
+}
+
+fn bind_new_inner(
+    session: Option<&str>,
+    known: &str,
+    target: &Target,
+    pin: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
     let session = SessionTarget::Named(warpify_client::attach_session(session).into());
     let known = warpify_client::parse_known(known)?;
     let client = warpify_client::wait_for_new_client(&session, &known)?;
     tracing::debug!(client, "binding the new client");
-    warpify_client::send(
-        &Request::Bind {
-            client,
-            target: target.clone(),
-            pin,
-        },
-        &session,
-    )?;
-    Ok(())
+    let tab = warpify_client::bind_and_confirm(&session, client, target, pin)?;
+    Ok(format!(
+        "client {client} bound to tab \"{}\" (id {})",
+        tab.name, tab.id
+    ))
 }
 
 fn run(request: &Request, target: &SessionTarget) -> Result<(), Box<dyn std::error::Error>> {

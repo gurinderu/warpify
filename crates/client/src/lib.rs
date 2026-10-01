@@ -13,8 +13,8 @@ use warpify_proto::{ClientId, Event, Request, State, HEARTBEAT_SECS, PIPE_NAME};
 mod bind;
 
 pub use bind::{
-    attach_session, bind_and_confirm, check_outside_zellij, confirmed, parse_known, pick_new,
-    wait_for_new_client, DEFAULT_SESSION,
+    attach_log_path, attach_session, bind_and_confirm, check_outside_zellij, confirmed,
+    parse_known, pick_new, wait_for_new_client, DEFAULT_SESSION,
 };
 
 #[derive(Debug, Clone, PartialEq)]
