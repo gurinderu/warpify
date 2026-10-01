@@ -124,7 +124,7 @@ The carrier table is in `REALITY.md` at the root, read on occasion. Before sayin
 | build (default members: all but the plugin) | `cargo build` |
 | build plugin | `cargo build -p warpify-plugin --target wasm32-wasip1 --release` |
 | test | `cargo test` |
-| release | push a `vX.Y.Z` tag matching the workspace version; `.github/workflows/release.yml` builds the plugin and publishes `warpify.wasm` + `.sha256` (what `warpify install zellij` downloads) |
+| release | merge the release PR that release-please keeps open on main (conventional commits drive the version; the release gets warpify.wasm + .sha256) |
 | lint | `cargo clippy --workspace --exclude warpify-plugin --all-targets -- -D warnings` (plugin: `-p warpify-plugin --target wasm32-wasip1`) |
 | format | `cargo fmt --all` |
 
@@ -141,7 +141,7 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 - `crates/client` — `warpify-client`: the CLI side of the pipe: runs `zellij pipe`, reads NDJSON replies, liveness timeout and the "is it loaded?" errors; fire-and-forget `send`; `bind` confirmation and `attach`'s wait for the new client (`bind.rs`; node #16).
 - `crates/telemetry` — `warpify-telemetry`: `init(default_filter)` installs the `tracing` subscriber on stderr (no timestamps, `RUST_LOG` overrides); no threads, builds for `wasm32-wasip1`.
 - `crates/install` — `warpify-install`: `warpify install|uninstall zellij` logic, host-tested: paths, sha256-verified download (`ureq`), a pure `Plan` then execution, format-preserving `kdl` edits of zellij's `config.kdl` (`load_plugins`) and `permissions.kdl` (grants from `warpify_proto::PERMISSIONS`), "manual" snippet for nix-store/read-only configs (graph @nick/warpify, node #17).
-- `.github/workflows/release.yml` — on a `v*` tag: builds the wasm plugin and attaches `warpify.wasm` and `warpify.wasm.sha256` to the GitHub release.
+- `.github/workflows/release-please.yml`, `release-please-config.json`, `.release-please-manifest.json` — release-please opens and updates the release PR on `main`; merging it tags `vX.Y.Z`, and the workflow's `assets` job builds the wasm plugin and attaches `warpify.wasm` and `warpify.wasm.sha256` to the GitHub release.
 - `bin/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`. zellij runs one instance per client and fans each pipe message to all of them. Designed so that session-wide replies come from the lowest client's instance and per-client moves from that client's own instance (graph @nick/warpify, nodes #9, #10) — not yet observed in a live session.
 - `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI (clap, printing) over `warpify-client` (`state`, `watch`, `bind`, `attach`, `install`/`uninstall`, hidden `__bind-new` helper; global `-s/--session <name>` targets a named session, default the current one — `attach` defaults to `warpify`).
 
@@ -165,6 +165,7 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 - **Pre-commit hook** (`.githooks/pre-commit`) runs fmt check and host clippy; not enabled — gate before push.
 - **Branch doesn't live without a PR**: pushed a branch — open a PR in the same move (draft if unfinished). Forge: GitHub, CLI `gh` (`gh pr checks <n> --watch`).
 - **Definition of done**: PR into `main` merged with the `ci` check green (`gh pr checks <n> --watch`).
+- **Releases**: never tag by hand; release-please opens the release PR, merging it publishes the release. Remove `release-as` from release-please-config.json after the first release.
 - **Never** `--no-verify`, `--force`, `--no-gpg-sign`, `git reset --hard` without an explicit instruction.
 
 *(iskronify: contract 18, stamp 2026-10-01 — offer a re-run when the installed iskronify's description names a higher contract or when the sources this file was derived from moved after this date.)*
