@@ -54,6 +54,14 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// grant the plugin at an exact path its permissions, nothing else (for nix/home-manager)
+    #[command(name = "__grant-permissions", hide = true)]
+    GrantPermissions {
+        integration: Integration,
+        /// absolute path zellij loads the plugin from
+        #[arg(long, value_name = "ABS PATH")]
+        wasm_path: std::path::PathBuf,
+    },
     /// move a client to a tab and bind it there
     Bind {
         /// the client to move (see `state`)
@@ -155,6 +163,10 @@ fn main() -> ExitCode {
             integration,
             dry_run,
         } => install::uninstall(integration, dry_run),
+        Cmd::GrantPermissions {
+            integration,
+            wasm_path,
+        } => install::grant_permissions(integration, &wasm_path),
         Cmd::Attach { target, pin } => attach(cli.session.as_deref(), &target.target(), pin),
         Cmd::BindNew { known, target, pin } => {
             bind_new(cli.session.as_deref(), &known, &target.target(), pin)
@@ -354,6 +366,22 @@ mod tests {
         assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij"]).is_ok());
         assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij", "--wasm", "x"]).is_err());
         assert!(Cli::try_parse_from(["warpify", "install", "tmux"]).is_err());
+    }
+
+    #[test]
+    fn grant_permissions_is_hidden_and_takes_a_path() {
+        use clap::CommandFactory;
+        let argv = [
+            "warpify",
+            "__grant-permissions",
+            "zellij",
+            "--wasm-path",
+            "/w",
+        ];
+        assert!(Cli::try_parse_from(argv).is_ok());
+        assert!(Cli::command()
+            .get_subcommands()
+            .any(|c| c.get_name() == "__grant-permissions" && c.is_hide_set()));
     }
 
     #[test]

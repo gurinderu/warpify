@@ -13,7 +13,7 @@ mod plan;
 
 pub use checksum::{parse_sha256_line, verify_sha256};
 pub use config::{edit_install, edit_uninstall};
-pub use exec::{entry_for, execute, Fetcher, UreqFetcher};
+pub use exec::{entry_for, execute, grant_permissions, Fetcher, UreqFetcher};
 pub use paths::{Dirs, EnvVars, Paths};
 pub use permissions::{merge_permissions, remove_permissions};
 pub use plan::{

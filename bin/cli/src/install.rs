@@ -1,11 +1,11 @@
 //! `warpify install|uninstall <integration>`: wiring over `warpify-install`.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use warpify_install::{
-    execute, plan_install, plan_uninstall, probe_config, Action, Dirs, EnvVars, Paths, Plan,
-    Source, UreqFetcher,
+    execute, grant_permissions as grant, plan_install, plan_uninstall, probe_config, Action, Dirs,
+    EnvVars, Paths, Plan, Source, UreqFetcher,
 };
 
 use crate::{Integration, Outcome};
@@ -29,6 +29,14 @@ pub fn install(integration: Integration, wasm: Option<PathBuf>, dry_run: bool) -
     let access = probe_config(&paths.config);
     let plan = plan_install(&paths, &source, &access)?;
     finish(&plan, dry_run, closing(&plan, true))
+}
+
+/// Hidden: only the permission grant for a plugin placed elsewhere (nix); one line out.
+pub fn grant_permissions(integration: Integration, wasm: &Path) -> Outcome {
+    let Integration::Zellij = integration;
+    let paths = Paths::resolve(&EnvVars::from_process(), &Dirs::from_system()?)?;
+    writeln!(io::stdout().lock(), "{}", grant(&paths.permissions, wasm)?)?;
+    Ok(())
 }
 
 pub fn uninstall(integration: Integration, dry_run: bool) -> Outcome {

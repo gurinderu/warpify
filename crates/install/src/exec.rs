@@ -88,6 +88,20 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
     }
 }
 
+/// Grants the plugin at `wasm` the permissions warpify needs in zellij's `permissions` file,
+/// touching nothing else (for setups that place the plugin and config themselves, e.g. nix).
+///
+/// # Errors
+/// When `wasm` is not an absolute UTF-8 path, or the file can't be read, parsed or written.
+pub fn grant_permissions(permissions: &Path, wasm: &Path) -> Result<String> {
+    if !wasm.is_absolute() {
+        return Err(Error::new("the plugin path must be absolute"));
+    }
+    edit(permissions, "permissions", |t| {
+        merge_permissions(t, wasm, PERMISSIONS)
+    })
+}
+
 /// Reads `file` (missing counts as empty), applies `change`, writes when it says so.
 fn edit(
     file: &Path,
@@ -218,6 +232,28 @@ mod tests {
             sha.as_bytes().to_vec(),
         );
         Fake(m, RefCell::default())
+    }
+
+    #[test]
+    fn grant_writes_only_the_permissions_file() {
+        let (t, p) = sandbox();
+        let wasm = Path::new("/s/warpify/warpify-zellij.wasm");
+        let line = grant_permissions(&p.permissions, wasm).unwrap();
+        assert!(line.starts_with("updated permissions in "), "{line}");
+        let text = std::fs::read_to_string(&p.permissions).unwrap();
+        assert!(
+            text.contains("\"/s/warpify/warpify-zellij.wasm\" {"),
+            "{text}"
+        );
+        assert!(PERMISSIONS.iter().all(|perm| text.contains(perm)));
+        assert!(grant_permissions(&p.permissions, wasm)
+            .unwrap()
+            .contains("already up to date"));
+        assert!(!p.config.exists() && !p.wasm.exists());
+        assert!(grant_permissions(&p.permissions, Path::new("rel.wasm")).is_err());
+        std::fs::write(&p.permissions, "\"/x\" {").unwrap();
+        assert!(grant_permissions(&p.permissions, wasm).is_err());
+        drop(t);
     }
 
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
