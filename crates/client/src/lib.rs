@@ -22,6 +22,8 @@ pub enum Error {
     Closed,
     /// `zellij pipe` exited with a failure.
     Exit(String),
+    /// No session was named and the process isn't running inside one.
+    NoSession,
 }
 
 impl fmt::Display for Error {
@@ -36,11 +38,55 @@ impl fmt::Display for Error {
                 "the pipe closed before the warpify plugin sent a state — is the warpify plugin loaded in this session, and are its permissions granted?",
             ),
             Error::Exit(status) => write!(f, "zellij pipe exited with {status}"),
+            Error::NoSession => f.write_str(
+                "not inside a zellij session — run from a pane of the session or pass --session <name>",
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// Which zellij session to talk to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// The session this process runs in (`ZELLIJ_SESSION_NAME`).
+    Current,
+    /// The session with this name.
+    Named(String),
+}
+
+/// Decides the session to address: the named one, else the current one if `env_session` (the value
+/// of `ZELLIJ_SESSION_NAME`) is set and non-empty. `Ok(None)` means "zellij picks the current one".
+fn resolve_session<'a>(
+    target: &'a Target,
+    env_session: Option<&str>,
+) -> Result<Option<&'a str>, Error> {
+    match target {
+        Target::Named(name) => Ok(Some(name)),
+        Target::Current if env_session.is_some_and(|s| !s.is_empty()) => Ok(None),
+        Target::Current => Err(Error::NoSession),
+    }
+}
+
+/// Removes ANSI escape sequences (CSI `ESC [ … final-byte`) from `text`.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+        } else if chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
 
 /// Passes a state through only when it differs from the last one passed: several plugin
 /// instances may answer the same watch, and their identical states must print once.
@@ -60,16 +106,26 @@ impl Changes {
     }
 }
 
-/// Sends `request` down the pipe and feeds each reply (heartbeats included) to `on_event` until it
+/// Sends `request` to the `target` session's pipe and feeds each reply (heartbeats included) to `on_event` until it
 /// returns `false` or the pipe closes.
 ///
 /// # Errors
-/// If no State arrives before the pipe closes, if nothing at all arrives for three heartbeat
+/// If there is no session to address, if no State arrives before the pipe closes, if nothing at all arrives for three heartbeat
 /// periods, if a reply can't be parsed, or if `zellij` fails to run or exits with a failure.
-pub fn stream(request: &Request, mut on_event: impl FnMut(&Event) -> bool) -> Result<(), Error> {
+pub fn stream(
+    request: &Request,
+    target: &Target,
+    mut on_event: impl FnMut(&Event) -> bool,
+) -> Result<(), Error> {
+    let env_session = std::env::var("ZELLIJ_SESSION_NAME").ok();
+    let session = resolve_session(target, env_session.as_deref())?;
     let payload = serde_json::to_string(request).map_err(|e| Error::Zellij(e.to_string()))?;
     tracing::debug!(payload, "spawning zellij pipe");
-    let mut child = Command::new("zellij")
+    let mut command = Command::new("zellij");
+    if let Some(name) = session {
+        command.args(["--session", name]);
+    }
+    let mut child = command
         .args(["pipe", "--name", PIPE_NAME, "--", &payload])
         .stdout(Stdio::piped())
         .spawn()
@@ -125,7 +181,10 @@ fn parse_line(line: &str) -> Option<Result<Event, Error>> {
     if line.trim().is_empty() {
         return None;
     }
-    Some(serde_json::from_str(line).map_err(|e| Error::Reply(format!("bad reply {line:?}: {e}"))))
+    Some(
+        serde_json::from_str(line)
+            .map_err(|e| Error::Reply(format!("bad reply {:?}: {e}", strip_ansi(line)))),
+    )
 }
 
 /// Reads reply lines from the pipe and forwards them until it closes or the receiver is gone.
@@ -166,6 +225,36 @@ mod tests {
         let err = parse_line("not json").unwrap().unwrap_err();
         assert!(matches!(err, Error::Reply(_)));
         assert!(err.to_string().starts_with("bad reply \"not json\""));
+    }
+
+    #[test]
+    fn bad_reply_strips_ansi() {
+        let err = parse_line("\u{1b}[32;1mwtest\u{1b}[m [Created 3h ago]")
+            .unwrap()
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .starts_with("bad reply \"wtest [Created 3h ago]\": "));
+        assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    #[test]
+    fn session_resolution() {
+        let named = Target::Named("w".into());
+        assert_eq!(resolve_session(&Target::Current, Some("s")), Ok(None));
+        assert_eq!(
+            resolve_session(&Target::Current, None),
+            Err(Error::NoSession)
+        );
+        assert_eq!(
+            resolve_session(&Target::Current, Some("")),
+            Err(Error::NoSession)
+        );
+        assert_eq!(resolve_session(&named, None), Ok(Some("w")));
+        assert_eq!(resolve_session(&named, Some("s")), Ok(Some("w")));
+        assert!(Error::NoSession
+            .to_string()
+            .starts_with("not inside a zellij session"));
     }
 
     #[test]

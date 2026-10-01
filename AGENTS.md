@@ -140,7 +140,7 @@ The plugin lands at `target/wasm32-wasip1/release/warpify.wasm`; the CLI at `tar
 - `crates/client` — `warpify-client`: the CLI side of the pipe: runs `zellij pipe`, reads NDJSON replies, liveness timeout and the "is it loaded?" errors.
 - `crates/telemetry` — `warpify-telemetry`: `init(default_filter)` installs the `tracing` subscriber on stderr (no timestamps, `RUST_LOG` overrides); no threads, builds for `wasm32-wasip1`.
 - `bin/plugin` — `warpify-plugin`, bin `warpify` (`src/main.rs`): the zellij plugin, built for `wasm32-wasip1`, pinned to `zellij-tile =0.45.1`. zellij runs one instance per client and fans each pipe message to all of them. Designed so that session-wide replies come from the lowest client's instance and per-client moves from that client's own instance (graph @nick/warpify, nodes #9, #10) — not yet observed in a live session.
-- `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI (clap, printing) over `warpify-client` (`state`, `watch`).
+- `bin/cli` — `warpify-cli`, bin `warpify`: the host CLI (clap, printing) over `warpify-client` (`state`, `watch`; global `-s/--session <name>` targets a named session, default the current one).
 
 ## Code conventions
 - **Meaning lives in the graph, code references it**: a comment carrying rationale, discarded alternatives or integration design is a node; in code — "(graph @nick/warpify, node #N)", also for the discarded ("not cached: #N"). Mechanics — words in place. After referencing, check the node says it; diverged — fix the node.

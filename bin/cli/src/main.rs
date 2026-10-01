@@ -1,4 +1,4 @@
-//! `warpify` — talks to the warpify zellij plugin of the current session over `zellij pipe`.
+//! `warpify` — talks to the warpify zellij plugin of a zellij session over `zellij pipe`.
 
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
@@ -6,14 +6,17 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use warpify_proto::{Event, Request, State};
 
-/// Talks to the warpify zellij plugin of the current session over `zellij pipe`. The plugin must
-/// already be loaded in the session (zellij config or layout).
+/// Talks to the warpify zellij plugin of a session (the current one, or --session) over
+/// `zellij pipe`. The plugin must already be loaded in the session (zellij config or layout).
 #[derive(Parser)]
 #[command(name = "warpify", about)]
 struct Cli {
     /// log diagnostics to stderr: -v debug, -vv trace (`RUST_LOG` overrides)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
+    /// send to this zellij session instead of the current one
+    #[arg(short, long, value_name = "NAME", global = true)]
+    session: Option<String>,
     #[command(subcommand)]
     command: Cmd,
 }
@@ -36,7 +39,11 @@ fn main() -> ExitCode {
     warpify_telemetry::init(&format!(
         "warpify={level},warpify_client={level},warpify_session={level}"
     ));
-    match run(&cli.command.into()) {
+    let target = cli.session.map_or(
+        warpify_client::Target::Current,
+        warpify_client::Target::Named,
+    );
+    match run(&cli.command.into(), &target) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("warpify: {err}");
@@ -54,12 +61,15 @@ impl From<Cmd> for Request {
     }
 }
 
-fn run(request: &Request) -> Result<(), Box<dyn std::error::Error>> {
+fn run(
+    request: &Request,
+    target: &warpify_client::Target,
+) -> Result<(), Box<dyn std::error::Error>> {
     let once = *request == Request::State;
     let mut changes = warpify_client::Changes::default();
     let mut out = BufWriter::new(io::stdout().lock());
     let mut write_err = None;
-    warpify_client::stream(request, |event| {
+    warpify_client::stream(request, target, |event| {
         if let Event::State(state) = event {
             if changes.is_new(state) {
                 // Flushed per state: `watch` must show each one at once.
@@ -123,6 +133,18 @@ mod tests {
         assert_eq!(cli.verbose, 2);
         let cli = Cli::try_parse_from(["warpify", "watch", "-v"]).unwrap();
         assert_eq!(cli.verbose, 1);
+    }
+
+    #[test]
+    fn session_option_is_global() {
+        let cli = Cli::try_parse_from(["warpify", "state", "-s", "w"]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("w"));
+        let cli = Cli::try_parse_from(["warpify", "--session", "w", "watch"]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("w"));
+        assert!(Cli::try_parse_from(["warpify", "state"])
+            .unwrap()
+            .session
+            .is_none());
     }
 
     #[test]
