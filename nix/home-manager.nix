@@ -4,9 +4,19 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.programs.warpify;
-  inherit (pkgs.stdenv.hostPlatform) system;
-  # zellij keys its permission cache by this path, so it stays put while the store path moves.
-  wasm = "${config.xdg.dataHome}/warpify/warpify-zellij.wasm";
+  inherit (pkgs.stdenv.hostPlatform) system isDarwin;
+  # Where `warpify install` puts the plugin (`directories::BaseDirs::data_dir()` + warpify/): the
+  # XDG data dir on Linux, ~/Library/Application Support on macOS. zellij keys its permission
+  # cache by this path, so it stays put while the store path moves.
+  wasm =
+    if isDarwin
+    then "${config.home.homeDirectory}/Library/Application Support/warpify/warpify-zellij.wasm"
+    else "${config.xdg.dataHome}/warpify/warpify-zellij.wasm";
+  # The zellij major.minor the plugin is built for: derived from Cargo.lock's zellij-tile at eval time.
+  tileVersion =
+    (lib.findFirst (p: p.name == "zellij-tile") null
+      (builtins.fromTOML (builtins.readFile ./../Cargo.lock)).package).version;
+  builtFor = lib.concatStringsSep "." (lib.take 2 (lib.splitString "." tileVersion));
   # lib.hm.generators.toKDL writes attribute names verbatim: pre-quote them to get
   # `"file:/…" ` child nodes with no arguments.
   node = name: { "\"${name}\"" = { }; };
@@ -31,13 +41,28 @@ in
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ];
 
-    xdg.dataFile."warpify/warpify-zellij.wasm".source = "${cfg.zellijPlugin}/lib/warpify-zellij.wasm";
+    # force: an earlier `warpify install` copy must not make activation fail on clobber.
+    xdg.dataFile."warpify/warpify-zellij.wasm" = lib.mkIf (!isDarwin) {
+      source = "${cfg.zellijPlugin}/lib/warpify-zellij.wasm";
+      force = true;
+    };
+    home.file."Library/Application Support/warpify/warpify-zellij.wasm" = lib.mkIf isDarwin {
+      source = "${cfg.zellijPlugin}/lib/warpify-zellij.wasm";
+      force = true;
+    };
+
+    warnings = lib.optional
+      (config.programs.zellij.enable
+        && !(lib.hasPrefix "${builtFor}." config.programs.zellij.package.version))
+      "warpify's zellij plugin is built for zellij ${builtFor}; programs.zellij.package is ${config.programs.zellij.package.version} — the plugin may not load";
 
     # load_plugins replaces zellij's defaults, so zellij:link is repeated here.
     programs.zellij.settings.load_plugins = node "zellij:link" // node "file:${wasm}";
 
     home.activation.warpifyGrantPermissions = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      run ${cfg.package}/bin/warpify __grant-permissions zellij --wasm-path ${lib.escapeShellArg wasm}
+      # Never break `home-manager switch` over this: zellij asks on first load instead.
+      run ${cfg.package}/bin/warpify __grant-permissions zellij --wasm-path ${lib.escapeShellArg wasm} \
+        || warnEcho "warpify: couldn't grant the plugin's permissions (see above); zellij will ask on first load"
     '';
   };
 }

@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use warpify_install::{
-    execute, grant_permissions as grant, plan_install, plan_uninstall, probe_config, Action, Dirs,
-    EnvVars, Paths, Plan, Source, UreqFetcher,
+    ensure_not_managed, execute, grant_permissions as grant, plan_install, plan_uninstall,
+    probe_config, Action, Dirs, EnvVars, Paths, Plan, Source, UreqFetcher,
 };
 
 use crate::{Integration, Outcome};
@@ -20,6 +20,7 @@ const UNINSTALLED: &str =
 pub fn install(integration: Integration, wasm: Option<PathBuf>, dry_run: bool) -> Outcome {
     let Integration::Zellij = integration;
     let paths = Paths::resolve(&EnvVars::from_process(), &Dirs::from_system()?)?;
+    ensure_not_managed(&paths.wasm)?;
     let source = match wasm {
         Some(from) => Source::Local(std::fs::canonicalize(from)?),
         None => Source::Release {
@@ -42,6 +43,7 @@ pub fn grant_permissions(integration: Integration, wasm: &Path) -> Outcome {
 pub fn uninstall(integration: Integration, dry_run: bool) -> Outcome {
     let Integration::Zellij = integration;
     let paths = Paths::resolve(&EnvVars::from_process(), &Dirs::from_system()?)?;
+    ensure_not_managed(&paths.wasm)?;
     let access = probe_config(&paths.config);
     let plan = plan_uninstall(&paths, &access)?;
     finish(&plan, dry_run, closing(&plan, false))
