@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use warpify_proto::{Event as WireEvent, Request, State, HEARTBEAT_SECS, PIPE_NAME};
-use warpify_session::{Snapshot, TabSnapshot};
+use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
+use warpify_session::{on_tabs, plan_bind, BindStep, Binding, Correction, Snapshot, TabSnapshot};
 use zellij_tile::prelude::*;
 
 /// zellij runs one instance of this plugin per connected client and fans every pipe message out
@@ -42,6 +42,7 @@ impl ZellijPlugin for Warpify {
         match event {
             Event::TabUpdate(tabs) => {
                 self.session.tabs = tabs.iter().map(tab_snapshot).collect();
+                self.correct_binding();
                 self.broadcast_if_changed();
             }
             Event::Timer(_) => {
@@ -80,8 +81,8 @@ impl ZellijPlugin for Warpify {
                 self.last_sent = Some(state);
                 self.watchers.insert(pipe_id);
             }
-            // Not implemented yet; design in graph @nick/warpify, node #9 (risk #10).
-            Ok(Request::Bind { .. }) => tracing::info!(pipe_id, "bind is not implemented yet"),
+            // graph @nick/warpify, node #9 (risk #10)
+            Ok(Request::Bind { target, pin, .. }) => self.bind(&target, pin),
             Err(err) => tracing::warn!(%err, payload, "bad request"),
         }
         false
@@ -91,6 +92,55 @@ impl ZellijPlugin for Warpify {
 impl Warpify {
     fn state(&self) -> State {
         self.session.state()
+    }
+
+    fn bind(&mut self, target: &warpify_proto::Target, pin: bool) {
+        let client = self.session.own_client;
+        let tab = match plan_bind(target, &self.session.tabs) {
+            BindStep::GoTo(id) => {
+                go_to_tab_id(id);
+                Some(id)
+            }
+            BindStep::FocusOrCreate(name) => focus_or_create_tab(&name),
+            BindStep::CreateNew(name) => new_tab(name.as_deref(), None),
+            BindStep::Fail(reason) => {
+                tracing::warn!(client, reason, "bind failed");
+                return;
+            }
+        };
+        let Some(tab) = tab else {
+            tracing::warn!(client, ?target, "zellij returned no tab for bind");
+            return;
+        };
+        self.session.binding = Some(Binding::new(tab, pin));
+        tracing::info!(client, tab, pin, "bind executed");
+    }
+
+    /// Undo a drift from the binding (graph @nick/warpify, node #9).
+    fn correct_binding(&mut self) {
+        let client = self.session.own_client;
+        let Some(binding) = self.session.binding else {
+            return;
+        };
+        let binding = binding.seen_in(&self.session.tabs);
+        self.session.binding = Some(binding);
+        match on_tabs(self.session.binding, &self.session) {
+            Some(Correction::GoTo(tab)) => {
+                tracing::info!(client, tab, pin = binding.pin, "pin correction");
+                go_to_tab_id(tab);
+            }
+            Some(Correction::Detach) => {
+                tracing::info!(
+                    client,
+                    tab = binding.tab,
+                    pin = binding.pin,
+                    "bound tab gone, detaching"
+                );
+                self.session.binding = None;
+                detach();
+            }
+            None => {}
+        }
     }
 
     fn broadcast_if_changed(&mut self) {
@@ -111,6 +161,13 @@ impl Warpify {
             send(pipe_id, event);
         }
     }
+}
+
+fn go_to_tab_id(id: TabId) {
+    run_action(
+        actions::Action::GoToTabById { id: id as u64 },
+        BTreeMap::new(),
+    );
 }
 
 fn send(pipe_id: &str, event: &WireEvent) {
