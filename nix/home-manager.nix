@@ -23,7 +23,9 @@ let
   node = name: children: { "\"${name}\"" = children; };
   pluginConfig =
     lib.optionalAttrs (cfg.onConnect == "new-tab") { on_connect = "new_tab"; }
-    // lib.optionalAttrs cfg.pin { pin = "true"; };
+    // lib.optionalAttrs cfg.pin { pin = "true"; }
+    // lib.optionalAttrs cfg.title.enable { terminal_title = "true"; }
+    // lib.optionalAttrs (cfg.title.enable && cfg.title.prefix != "") { title_prefix = cfg.title.prefix; };
 in
 {
   options.programs.warpify = {
@@ -52,6 +54,23 @@ in
       type = lib.types.bool;
       default = false;
       description = "Keep a client bound on connect on its tab (needs `onConnect = \"new-tab\"`).";
+    };
+    title = {
+      enable = lib.mkEnableOption ''
+        the host and the session's tabs in the terminal title: the plugin renames each client's
+        focused pane to `<prefix> · <tab> · [<own tab>] · <tab>`, which zellij sends to the outer
+        terminal (what Warp shows as the tab title)
+      '';
+      prefix = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = lib.literalExpression ''"🟠 ''${config.networking.hostName or ""}"'';
+        description = ''
+          The title's first part, e.g. an emoji for the OS and the host name. Nothing reliable
+          to derive it from exists at evaluation time, so the default is empty (the title is then
+          just the tab list): set it per host.
+        '';
+      };
     };
   };
 

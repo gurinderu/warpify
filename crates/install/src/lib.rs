@@ -10,6 +10,7 @@ mod kdl_edit;
 mod paths;
 mod permissions;
 mod plan;
+mod title;
 
 pub use checksum::{parse_sha256_line, verify_sha256};
 pub use config::{edit_install, edit_uninstall};
@@ -20,6 +21,7 @@ pub use plan::{
     ensure_not_managed, plan_install, plan_uninstall, probe_config, release_url, Action,
     ConfigAccess, Plan, PluginOptions, Seen, Source, PLUGIN_FILE,
 };
+pub use title::default_title_prefix;
 
 use std::fmt;
 

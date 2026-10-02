@@ -71,7 +71,7 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
             file,
             entry,
             options,
-        } => edit_config(file, true, |t| edit_install(t, entry, *options)),
+        } => edit_config(file, true, |t| edit_install(t, entry, options)),
         Action::RemoveLoadPlugin { file, entry } => {
             edit_config(file, false, |t| edit_uninstall(t, entry))
         }
@@ -87,7 +87,7 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
             why,
             adding,
             seen,
-        } => Ok(manual_advice(file, seen, entry, *options, *adding, why)),
+        } => Ok(manual_advice(file, seen, entry, options, *adding, why)),
     }
 }
 

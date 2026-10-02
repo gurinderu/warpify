@@ -59,6 +59,13 @@ enum Cmd {
         /// keep a client bound on connect on its tab (needs --on-connect new-tab)
         #[arg(long, requires = "on_connect")]
         pin: bool,
+        /// show the host and the session's tabs in the terminal title (what Warp shows as the
+        /// tab title); the plugin renames the client's focused pane
+        #[arg(long)]
+        title: bool,
+        /// the title's first part; default: an emoji for the OS and the short host name
+        #[arg(long, value_name = "TEXT", requires = "title")]
+        title_prefix: Option<String>,
         /// print what would be done, change nothing
         #[arg(long)]
         dry_run: bool,
@@ -164,12 +171,17 @@ fn main() -> ExitCode {
             wasm,
             on_connect,
             pin,
+            title,
+            title_prefix,
             dry_run,
         } => install::install(
             integration,
             wasm,
-            on_connect == Some(OnConnect::NewTab),
-            pin,
+            warpify_install::PluginOptions {
+                new_tab_on_connect: on_connect == Some(OnConnect::NewTab),
+                pin,
+                title: title.then(|| title_prefix.unwrap_or_else(install::this_machine_prefix)),
+            },
             dry_run,
         ),
         Cmd::Uninstall {
@@ -290,6 +302,26 @@ mod tests {
         assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij"]).is_ok());
         assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij", "--wasm", "x"]).is_err());
         assert!(Cli::try_parse_from(["warpify", "install", "tmux"]).is_err());
+    }
+
+    #[test]
+    fn install_takes_title_and_its_prefix() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["warpify", "install", "zellij"].iter().chain(args))
+        };
+        let Cmd::Install {
+            title,
+            title_prefix,
+            ..
+        } = parse(&["--title", "--title-prefix", "🟠 x"])
+            .unwrap()
+            .command
+        else {
+            panic!("not install")
+        };
+        assert!(title && title_prefix.as_deref() == Some("🟠 x"));
+        assert!(parse(&["--title"]).is_ok());
+        assert!(parse(&["--title-prefix", "x"]).is_err());
     }
 
     #[test]

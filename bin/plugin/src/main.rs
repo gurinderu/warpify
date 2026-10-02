@@ -7,7 +7,7 @@ use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
 use warpify_session::{
     departed, on_tabs, plan_bind, tab_index, BindStep, Config, ConnectAction, ConnectStep,
-    Correction, Internal, Snapshot, TabSnapshot, INTERNAL_PIPE,
+    Correction, Focus, Internal, Snapshot, TabSnapshot, TitleOp, INTERNAL_PIPE,
 };
 use zellij_tile::prelude::*;
 
@@ -67,6 +67,8 @@ impl ZellijPlugin for Warpify {
             EventType::ListClients,
             EventType::Timer,
             EventType::PermissionRequestResult,
+            // Focus moving between panes of a tab (graph @nick/warpify, node #23).
+            EventType::PaneUpdate,
         ]);
         set_selectable(false);
         self.session.own_client = get_plugin_ids().client_id;
@@ -82,7 +84,9 @@ impl ZellijPlugin for Warpify {
                 self.announce_departures();
                 self.correct_binding();
                 self.broadcast_if_changed();
+                self.refresh_title();
             }
+            Event::PaneUpdate(_) | Event::PermissionRequestResult(_) => self.refresh_title(),
             Event::SessionUpdate(sessions, _) => {
                 let empty = sessions
                     .iter()
@@ -229,6 +233,37 @@ impl Warpify {
             ConnectAction::NewTab { pin } => {
                 tracing::info!(client, pin, "on connect: new tab");
                 self.bind(&warpify_proto::Target::New(None), pin);
+            }
+        }
+    }
+
+    /// Keep the title in step: the own client's focused pane is named after the tab list, and a
+    /// pane that lost focus gets its own title back. The focused pane is asked of zellij, per
+    /// client: `PaneInfo::is_focused` in a `PaneUpdate` isn't (zellij-server 0.45.1,
+    /// `tab/mod.rs` `pane_infos`, no client id), while `get_focused_pane_info` answers for this
+    /// instance's client (`screen.rs` `GetFocusedPaneInfo`). Graph @nick/warpify, node #23.
+    fn refresh_title(&mut self) {
+        if !self.config.title || !self.session.connected {
+            return;
+        }
+        let focused = match get_focused_pane_info() {
+            Ok((tab, PaneId::Terminal(pane))) => Some(Focus { tab, pane }),
+            Ok(_) => None,
+            Err(err) => {
+                tracing::debug!(%err, "no focused pane for the title");
+                None
+            }
+        };
+        for op in self.session.plan_title(&self.config, focused) {
+            match op {
+                TitleOp::Rename(pane, text) => {
+                    tracing::debug!(pane, text, "title: rename");
+                    rename_terminal_pane(pane, text);
+                }
+                TitleOp::Restore(pane) => {
+                    tracing::debug!(pane, "title: restore");
+                    rename_terminal_pane(pane, "");
+                }
             }
         }
     }

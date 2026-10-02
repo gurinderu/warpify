@@ -3,7 +3,10 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use warpify_proto::{CONFIG_ON_CONNECT, CONFIG_PIN, CONFIG_TRUE, ON_CONNECT_NEW_TAB};
+use warpify_proto::{
+    CONFIG_ON_CONNECT, CONFIG_PIN, CONFIG_TITLE, CONFIG_TITLE_PREFIX, CONFIG_TRUE,
+    ON_CONNECT_NEW_TAB,
+};
 
 use crate::config::lists_entry;
 use crate::{Error, Paths, Result};
@@ -62,42 +65,74 @@ pub enum ConfigAccess {
 
 /// The plugin settings written as children of our `load_plugins` entry (the plugin parses them
 /// in `warpify_session::Config`); the defaults write no children (graph @nick/warpify, node #16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PluginOptions {
     /// `on_connect "new_tab"`.
     pub new_tab_on_connect: bool,
     /// `pin "true"`.
     pub pin: bool,
+    /// `terminal_title "true"` and `title_prefix "<prefix>"` (the prefix is left out when empty): the
+    /// plugin shows the prefix and the tab list in the terminal title (graph @nick/warpify,
+    /// node #23). `None`: no title.
+    pub title: Option<String>,
+}
+
+/// `s` as a KDL quoted string, quotes included.
+pub(crate) fn kdl_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 impl PluginOptions {
     /// The children keys this struct owns in an entry.
-    pub(crate) const KEYS: &'static [&'static str] = &[CONFIG_ON_CONNECT, CONFIG_PIN];
+    pub(crate) const KEYS: &'static [&'static str] = &[
+        CONFIG_ON_CONNECT,
+        CONFIG_PIN,
+        CONFIG_TITLE,
+        CONFIG_TITLE_PREFIX,
+    ];
 
-    /// The `key "value"` children to write.
-    pub(crate) fn pairs(self) -> Vec<(&'static str, &'static str)> {
+    /// The `key value` children to write, values unquoted.
+    pub(crate) fn pairs(&self) -> Vec<(&'static str, String)> {
         let mut pairs = Vec::new();
         if self.new_tab_on_connect {
-            pairs.push((CONFIG_ON_CONNECT, ON_CONNECT_NEW_TAB));
+            pairs.push((CONFIG_ON_CONNECT, ON_CONNECT_NEW_TAB.to_owned()));
         }
         if self.pin {
-            pairs.push((CONFIG_PIN, CONFIG_TRUE));
+            pairs.push((CONFIG_PIN, CONFIG_TRUE.to_owned()));
+        }
+        if let Some(prefix) = &self.title {
+            pairs.push((CONFIG_TITLE, CONFIG_TRUE.to_owned()));
+            if !prefix.is_empty() {
+                pairs.push((CONFIG_TITLE_PREFIX, prefix.clone()));
+            }
         }
         pairs
     }
 
     /// The children as KDL on one line: `on_connect "new_tab"; pin "true";`.
-    pub(crate) fn children_text(self) -> String {
+    pub(crate) fn children_text(&self) -> String {
         let kids: Vec<String> = self
             .pairs()
             .iter()
-            .map(|(k, v)| format!("{k} \"{v}\";"))
+            .map(|(k, v)| format!("{k} {};", kdl_string(v)))
             .collect();
         kids.join(" ")
     }
 
     /// The entry as one line of KDL, children included: `"file:/w" { on_connect "new_tab"; }`.
-    pub(crate) fn snippet(self, entry: &str) -> String {
+    pub(crate) fn snippet(&self, entry: &str) -> String {
         if self.pairs().is_empty() {
             format!("\"{entry}\"")
         } else {

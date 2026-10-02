@@ -84,7 +84,7 @@ pub(crate) fn set_options(
     parent: &mut KdlNode,
     name: &str,
     owned: &[&str],
-    options: &[(&str, &str)],
+    options: &[(&str, String)],
 ) -> bool {
     let Some(node) = parent.children_mut().as_mut().and_then(|doc| {
         doc.nodes_mut()
@@ -110,7 +110,7 @@ pub(crate) fn set_options(
         .collect();
     let want: Vec<(String, Option<String>)> = options
         .iter()
-        .map(|(k, v)| ((*k).to_owned(), Some((*v).to_owned())))
+        .map(|(k, v)| ((*k).to_owned(), Some(v.clone())))
         .collect();
     let mut sorted = have.clone();
     sorted.sort();
@@ -129,7 +129,11 @@ pub(crate) fn set_options(
         .filter(|n| !owned.contains(&n.name().value()))
         .map(|n| n.to_string().trim().to_owned())
         .collect();
-    lines.extend(options.iter().map(|(k, v)| format!("{k} \"{v}\"")));
+    lines.extend(
+        options
+            .iter()
+            .map(|(k, v)| format!("{k} {}", crate::plan::kdl_string(v))),
+    );
     let mut text = format!("\"{name}\"");
     if !lines.is_empty() {
         text.push_str(" {\n");

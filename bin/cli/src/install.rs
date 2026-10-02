@@ -4,8 +4,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use warpify_install::{
-    ensure_not_managed, execute, grant_permissions as grant, plan_install, plan_uninstall,
-    probe_config, Action, Dirs, EnvVars, Paths, Plan, PluginOptions, Source, UreqFetcher,
+    default_title_prefix, ensure_not_managed, execute, grant_permissions as grant, plan_install,
+    plan_uninstall, probe_config, Action, Dirs, EnvVars, Paths, Plan, PluginOptions, Source,
+    UreqFetcher,
 };
 
 use crate::{Integration, Outcome};
@@ -20,8 +21,7 @@ const UNINSTALLED: &str =
 pub fn install(
     integration: Integration,
     wasm: Option<PathBuf>,
-    new_tab_on_connect: bool,
-    pin: bool,
+    options: PluginOptions,
     dry_run: bool,
 ) -> Outcome {
     let Integration::Zellij = integration;
@@ -34,12 +34,21 @@ pub fn install(
         },
     };
     let access = probe_config(&paths.config);
-    let options = PluginOptions {
-        new_tab_on_connect,
-        pin,
-    };
     let plan = plan_install(&paths, &source, options, &access)?;
     finish(&plan, dry_run, closing(&plan, true))
+}
+
+/// The title prefix when `--title-prefix` isn't given: this machine's OS emoji and host name.
+pub fn this_machine_prefix() -> String {
+    let os_release = std::fs::read_to_string("/etc/os-release").ok();
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .unwrap_or_default();
+    default_title_prefix(std::env::consts::OS, os_release.as_deref(), &hostname)
 }
 
 /// Hidden: only the permission grant for a plugin placed elsewhere (nix); one line out.

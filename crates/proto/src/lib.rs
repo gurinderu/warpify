@@ -26,6 +26,12 @@ pub const PERMISSIONS: &[&str] = &[
 /// home-manager module write them (graph @nick/warpify, node #16).
 pub const CONFIG_ON_CONNECT: &str = "on_connect";
 pub const CONFIG_PIN: &str = "pin";
+/// Show the remote description and the tab list in the terminal title (graph @nick/warpify,
+/// node #23). Not `title`: zellij strips that key from a plugin's configuration
+/// (zellij-utils 0.45.1, `input/layout.rs` `PluginUserConfiguration::new`).
+pub const CONFIG_TITLE: &str = "terminal_title";
+/// Free text that opens the title, e.g. an OS emoji and the host name.
+pub const CONFIG_TITLE_PREFIX: &str = "title_prefix";
 pub const ON_CONNECT_NEW_TAB: &str = "new_tab";
 pub const ON_CONNECT_NONE: &str = "none";
 pub const CONFIG_TRUE: &str = "true";

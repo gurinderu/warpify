@@ -30,6 +30,10 @@ let
     programs.warpify = {
       onConnect = "new-tab";
       pin = true;
+      title = {
+        enable = true;
+        prefix = "🟠 test";
+      };
     };
   };
   # zellij disabled: home-manager writes no config.kdl, so the module must warn and not grant.
@@ -64,9 +68,12 @@ in
     # the defaults write no children; the options are children of our entry
     ! grep -F on_connect ${hm.config.home-files}/.config/zellij/config.kdl
     ! grep -F 'pin ' ${hm.config.home-files}/.config/zellij/config.kdl
-    kids=$(grep -F -A3 ${lib.escapeShellArg ''"file:${abs}"''} "$cfg")
+    ! grep -F terminal_title ${hm.config.home-files}/.config/zellij/config.kdl
+    kids=$(grep -F -A5 ${lib.escapeShellArg ''"file:${abs}"''} "$cfg")
     grep -F 'on_connect "new_tab"' <<<"$kids"
     grep -F 'pin "true"' <<<"$kids"
+    grep -F 'terminal_title "true"' <<<"$kids"
+    grep -F 'title_prefix "🟠 test"' <<<"$kids"
     ${if hmConnect.config.warnings == [ ] then "" else "echo ${lib.escapeShellArg (toString hmConnect.config.warnings)}; exit 1"}
     touch $out
   '';

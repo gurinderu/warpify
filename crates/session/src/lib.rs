@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use warpify_proto::{
     base_tab_name, Client, ClientId, Request, State, Tab, TabId, Target, CONFIG_FALSE,
-    CONFIG_ON_CONNECT, CONFIG_PIN, CONFIG_TRUE, ON_CONNECT_NEW_TAB, ON_CONNECT_NONE,
+    CONFIG_ON_CONNECT, CONFIG_PIN, CONFIG_TITLE, CONFIG_TITLE_PREFIX, CONFIG_TRUE,
+    ON_CONNECT_NEW_TAB, ON_CONNECT_NONE,
 };
 
 /// What the plugin does for a client that has just connected.
@@ -20,11 +21,16 @@ pub enum OnConnect {
 }
 
 /// The plugin's `load_plugins` configuration (graph @nick/warpify, node #16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Config {
     pub on_connect: OnConnect,
     /// Pin the bind made on connect.
     pub pin: bool,
+    /// Put the prefix and the tab list into the title of the own client's focused pane (graph
+    /// @nick/warpify, node #23).
+    pub title: bool,
+    /// Opens the title; empty: the title is just the tab list.
+    pub title_prefix: String,
 }
 
 impl Config {
@@ -53,8 +59,104 @@ impl Config {
                 _ => warn(CONFIG_PIN, value, CONFIG_FALSE),
             }
         }
+        if let Some(value) = map.get(CONFIG_TITLE) {
+            match value.as_str() {
+                CONFIG_TRUE => config.title = true,
+                CONFIG_FALSE => {}
+                _ => warn(CONFIG_TITLE, value, CONFIG_FALSE),
+            }
+        }
+        if let Some(value) = map.get(CONFIG_TITLE_PREFIX) {
+            value.trim().clone_into(&mut config.title_prefix);
+        }
         (config, warnings)
     }
+}
+
+/// Longest title, in characters, the plugin composes.
+pub const TITLE_MAX_CHARS: usize = 120;
+
+/// Separator between the parts of the composed title.
+const TITLE_SEP: &str = " · ";
+
+/// Starts every composed title. zellij names a default-named tab with a single pane after the
+/// pane's title, which is our rename, so a tab name can carry a composed title back to us; the
+/// mark says so (invisible, and no tab name of its own starts with it).
+const TITLE_MARK: char = '\u{200b}';
+
+/// The tab's own name: without the exit suffix, and when zellij took a composed title for the
+/// name, the bracketed part of it, which is the name of the tab the title was composed on. A
+/// composed title that was cut leaves nothing to take: an ellipsis (graph @nick/warpify,
+/// node #23).
+fn plain_tab_name(name: &str) -> &str {
+    let base = base_tab_name(name);
+    let Some(composed) = base.strip_prefix(TITLE_MARK) else {
+        return base;
+    };
+    bracketed(composed).unwrap_or("…")
+}
+
+/// The bracketed part of a composed title (without the mark).
+fn bracketed(composed: &str) -> Option<&str> {
+    composed
+        .split(TITLE_SEP)
+        .find_map(|part| part.strip_prefix('[')?.strip_suffix(']'))
+}
+
+/// The title for a client on the tab `own`: `<prefix> · <tab> · [<own tab>] · <tab>`, tabs in
+/// position order, names without zellij's exit suffix, an empty prefix left out, the tab list
+/// cut to `max_chars` with an ellipsis, then the mark. Empty when there are no tabs.
+#[must_use]
+pub fn compose_title(prefix: &str, tabs: &[TabSnapshot], own: TabId, max_chars: usize) -> String {
+    if tabs.is_empty() {
+        return String::new();
+    }
+    let mut ordered: Vec<&TabSnapshot> = tabs.iter().collect();
+    ordered.sort_by_key(|t| t.position);
+    let prefix = prefix.trim();
+    let parts: Vec<String> = Some(prefix.to_owned())
+        .filter(|p| !p.is_empty())
+        .into_iter()
+        .chain(ordered.iter().map(|t| {
+            let name = plain_tab_name(&t.name);
+            if t.id == own {
+                format!("[{name}]")
+            } else {
+                name.to_owned()
+            }
+        }))
+        .collect();
+    let title = parts.join(TITLE_SEP);
+    let room = max_chars.saturating_sub(1);
+    let title: String = if title.chars().count() <= max_chars {
+        title
+    } else {
+        title
+            .chars()
+            .take(room)
+            .chain(std::iter::once('…'))
+            .collect()
+    };
+    format!("{TITLE_MARK}{title}")
+}
+
+/// The terminal pane a client has focused and the tab it is on, as zellij reports them together
+/// (`get_focused_pane_info`), so a title never pairs a pane with another tab's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Focus {
+    pub tab: TabId,
+    pub pane: u32,
+}
+
+/// What the plugin does to a pane's name to keep the title in step (see
+/// [`Snapshot::plan_title`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TitleOp {
+    /// Name the terminal pane this text.
+    Rename(u32, String),
+    /// Give the pane's name back to the pane: an empty name makes zellij show the title the
+    /// program set (zellij-server 0.45.1, `panes/terminal_pane.rs` `render_terminal_title`).
+    Restore(u32),
 }
 
 /// What to do for a newly served client (see [`Snapshot::on_connect`]).
@@ -105,6 +207,14 @@ pub struct Snapshot {
     /// Where `on_connect` stands for this client's lifetime; `freeze` resets it, so the next
     /// client to take the id is served again (graph @nick/warpify, node #16).
     pub connect: ConnectPhase,
+    /// Terminal panes this instance renamed, with the name it gave. Kept across a freeze, so the
+    /// instance that next serves this client id gives them back (graph @nick/warpify, node #23).
+    pub titled: BTreeMap<u32, String>,
+    /// The names tabs have of their own, as far as this instance saw them: zellij reports a
+    /// composed title instead while it names a single-pane tab after its renamed pane, and
+    /// instances disagreeing on what to read back from it would rename each other's panes
+    /// forever (graph @nick/warpify, node #23).
+    pub natural: BTreeMap<TabId, String>,
 }
 
 /// The steps of serving a newly connected client. A tab update can't tell whether the client is
@@ -144,6 +254,8 @@ impl Default for Snapshot {
             connected: true,
             zero_pending: false,
             connect: ConnectPhase::Idle,
+            titled: BTreeMap::new(),
+            natural: BTreeMap::new(),
         }
     }
 }
@@ -383,6 +495,7 @@ impl Snapshot {
     /// stays cleared) and adopt a pending bind whose tab the client is now on.
     pub fn apply_tabs(&mut self, tabs: Vec<TabSnapshot>) {
         self.tabs = tabs;
+        self.learn_names();
         self.connected = true;
         // A tab update proves our own client is connected: a later empty list can't freeze.
         self.zero_pending = false;
@@ -390,6 +503,77 @@ impl Snapshot {
             let pin = self.pending.take().is_some_and(|p| p.pin);
             self.binding = Some(Binding::new(tab, pin));
         }
+    }
+
+    /// The pane renames that bring the title in step, given where the own client's focus is now
+    /// (`None`: none known, or not a terminal pane). Nothing while the option is off
+    /// or the instance is frozen. A recorded pane that isn't focused any more is given back; the
+    /// focused one is renamed when its name isn't what we set last (graph @nick/warpify,
+    /// node #23).
+    pub fn plan_title(&mut self, config: &Config, focus: Option<Focus>) -> Vec<TitleOp> {
+        if !config.title || !self.connected {
+            return Vec::new();
+        }
+        let mut ops = Vec::new();
+        let stale: Vec<u32> = self
+            .titled
+            .keys()
+            .copied()
+            .filter(|pane| Some(*pane) != focus.map(|f| f.pane))
+            .collect();
+        for pane in stale {
+            self.titled.remove(&pane);
+            ops.push(TitleOp::Restore(pane));
+        }
+        if let Some(Focus { tab, pane }) = focus {
+            let text = compose_title(
+                &config.title_prefix,
+                &self.tabs_by_natural_name(),
+                tab,
+                TITLE_MAX_CHARS,
+            );
+            if !text.is_empty() && self.titled.get(&pane) != Some(&text) {
+                self.titled.insert(pane, text.clone());
+                ops.push(TitleOp::Rename(pane, text));
+            }
+        }
+        ops
+    }
+
+    /// Remember the tabs' own names: a name that isn't a composed title is the tab's own; of a
+    /// composed one, only the bracketed part, and only for a tab not yet known.
+    fn learn_names(&mut self) {
+        self.natural
+            .retain(|id, _| self.tabs.iter().any(|t| t.id == *id));
+        for tab in &self.tabs {
+            let base = base_tab_name(&tab.name);
+            match base.strip_prefix(TITLE_MARK) {
+                None => {
+                    self.natural.insert(tab.id, base.to_owned());
+                }
+                Some(composed) => {
+                    if let Some(name) = bracketed(composed).filter(|n| *n != "…") {
+                        self.natural
+                            .entry(tab.id)
+                            .or_insert_with(|| name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tabs with their own names where known, for composing a title.
+    fn tabs_by_natural_name(&self) -> Vec<TabSnapshot> {
+        self.tabs
+            .iter()
+            .map(|t| TabSnapshot {
+                name: self
+                    .natural
+                    .get(&t.id)
+                    .map_or_else(|| plain_tab_name(&t.name).to_owned(), Clone::clone),
+                ..t.clone()
+            })
+            .collect()
     }
 
     /// Serve a newly connected client, once per client lifetime: call after [`Self::apply_tabs`],
@@ -1017,7 +1201,8 @@ mod tests {
             config,
             Config {
                 on_connect: OnConnect::NewTab,
-                pin: true
+                pin: true,
+                ..Config::default()
             }
         );
         assert!(warnings.is_empty());
@@ -1042,6 +1227,8 @@ mod tests {
     const NEW_TAB: Config = Config {
         on_connect: OnConnect::NewTab,
         pin: false,
+        title: false,
+        title_prefix: String::new(),
     };
 
     #[test]
@@ -1173,6 +1360,185 @@ mod tests {
         assert_eq!(
             snap.on_connect_clients(&NEW_TAB, 1),
             Some(ConnectAction::BoundCurrent(0))
+        );
+    }
+
+    fn tab_named(id: TabId, position: usize, name: &str, active: bool) -> TabSnapshot {
+        TabSnapshot {
+            name: name.to_owned(),
+            ..tab(id, position, active, &[])
+        }
+    }
+
+    #[test]
+    fn title_config_parses_and_warns() {
+        let (config, warnings) = Config::parse(&map(&[
+            ("terminal_title", "true"),
+            ("title_prefix", " 🟠 x "),
+        ]));
+        assert!(config.title && warnings.is_empty());
+        assert_eq!(config.title_prefix, "🟠 x");
+        let (config, warnings) = Config::parse(&map(&[("terminal_title", "yes")]));
+        assert!(!config.title);
+        assert_eq!(warnings.len(), 1);
+        assert!(!Config::parse(&BTreeMap::new()).0.title);
+    }
+
+    #[test]
+    fn title_lists_tabs_in_order_with_the_own_in_brackets() {
+        let tabs = [
+            tab_named(2, 1, "logs [ EXITED ] ", true),
+            tab_named(1, 0, "main", false),
+            tab_named(3, 2, "two", false),
+        ];
+        assert_eq!(
+            compose_title("🟠 test", &tabs, 2, 120),
+            "\u{200b}🟠 test · main · [logs] · two"
+        );
+        assert_eq!(
+            compose_title("", &tabs, 2, 120),
+            "\u{200b}main · [logs] · two"
+        );
+        assert_eq!(compose_title("p", &[], 1, 120), "");
+    }
+
+    #[test]
+    fn title_is_cut_with_an_ellipsis() {
+        let tabs = [tab_named(1, 0, "abcdefghij", true)];
+        let title = compose_title("pre", &tabs, 1, 10);
+        assert_eq!(title.chars().count(), 11);
+        assert_eq!(title, "\u{200b}pre · [ab…");
+        assert_eq!(
+            compose_title("pre", &tabs, 1, 120),
+            "\u{200b}pre · [abcdefghij]"
+        );
+    }
+
+    #[test]
+    fn a_composed_title_taken_for_a_tab_name_does_not_grow() {
+        // zellij names a single-pane default-named tab after the pane's title: ours.
+        let mut tabs = [tab_named(1, 0, "Tab #1", true), tab_named(2, 1, "b", false)];
+        let first = compose_title("P", &tabs, 1, 120);
+        assert_eq!(first, "\u{200b}P · [Tab #1] · b");
+        tabs[0].name = first.clone();
+        assert_eq!(compose_title("P", &tabs, 1, 120), first);
+        // another client's title, on the tab `b`, gives that tab's name back as well
+        tabs[1].name = "\u{200b}P · a · [b] [ EXITED ] ".into();
+        assert_eq!(compose_title("P", &tabs, 1, 120), first);
+        // a cut title has no bracketed part left
+        tabs[1].name = "\u{200b}P · a · [b…".into();
+        assert_eq!(
+            compose_title("P", &tabs, 1, 120),
+            "\u{200b}P · [Tab #1] · …"
+        );
+    }
+
+    fn titled_config() -> Config {
+        Config {
+            title: true,
+            title_prefix: "P".into(),
+            ..Config::default()
+        }
+    }
+
+    fn title_snapshot() -> Snapshot {
+        Snapshot {
+            own_client: 1,
+            tabs: vec![tab_named(1, 0, "a", true), tab_named(2, 1, "b", false)],
+            ..Snapshot::default()
+        }
+    }
+
+    fn at(tab: TabId, pane: u32) -> Focus {
+        Focus { tab, pane }
+    }
+
+    #[test]
+    fn title_renames_the_focused_pane_once() {
+        let mut snap = title_snapshot();
+        let config = titled_config();
+        assert_eq!(
+            snap.plan_title(&config, Some(at(1, 4))),
+            vec![TitleOp::Rename(4, "\u{200b}P · [a] · b".into())]
+        );
+        assert!(snap.plan_title(&config, Some(at(1, 4))).is_empty());
+        assert_eq!(
+            snap.plan_title(&config, Some(at(2, 4))),
+            vec![TitleOp::Rename(4, "\u{200b}P · a · [b]".into())]
+        );
+    }
+
+    #[test]
+    fn title_gives_the_pane_back_when_focus_leaves() {
+        let mut snap = title_snapshot();
+        let config = titled_config();
+        snap.plan_title(&config, Some(at(1, 4)));
+        assert_eq!(
+            snap.plan_title(&config, Some(at(1, 5))),
+            vec![
+                TitleOp::Restore(4),
+                TitleOp::Rename(5, "\u{200b}P · [a] · b".into())
+            ]
+        );
+        assert_eq!(snap.plan_title(&config, None), vec![TitleOp::Restore(5)]);
+        assert!(snap.titled.is_empty());
+    }
+
+    #[test]
+    fn title_is_off_or_silent_when_frozen() {
+        let mut snap = title_snapshot();
+        assert!(snap
+            .plan_title(&Config::default(), Some(at(1, 4)))
+            .is_empty());
+        let config = titled_config();
+        snap.plan_title(&config, Some(at(1, 4)));
+        snap.freeze();
+        assert!(snap.plan_title(&config, Some(at(1, 5))).is_empty());
+        // the record survives, so the next instance of this client gives the pane back
+        assert!(snap.titled.contains_key(&4));
+        snap.apply_tabs(snap.tabs.clone());
+        assert_eq!(
+            snap.plan_title(&config, Some(at(1, 5))),
+            vec![
+                TitleOp::Restore(4),
+                TitleOp::Rename(5, "\u{200b}P · [a] · b".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tab_keeps_the_name_it_had_before_a_title_took_its_place() {
+        let config = titled_config();
+        let mut snap = Snapshot {
+            own_client: 1,
+            ..Snapshot::default()
+        };
+        snap.apply_tabs(vec![
+            tab_named(1, 0, "Tab #1", true),
+            tab_named(2, 1, "b", false),
+        ]);
+        let ops = snap.plan_title(&config, Some(at(1, 4)));
+        assert_eq!(
+            ops,
+            vec![TitleOp::Rename(4, "\u{200b}P · [Tab #1] · b".into())]
+        );
+        // zellij now reports our title as the first tab's name, and some other client's title
+        // as the second's; neither is read back
+        snap.apply_tabs(vec![
+            tab_named(1, 0, "\u{200b}P · [Tab #1] · b", true),
+            tab_named(2, 1, "\u{200b}P · Tab #1 · […]", false),
+        ]);
+        assert!(snap.plan_title(&config, Some(at(1, 4))).is_empty());
+        assert_eq!(snap.natural[&1], "Tab #1");
+        assert_eq!(snap.natural[&2], "b");
+        // the title goes away: the name comes back and is learned again
+        snap.apply_tabs(vec![
+            tab_named(1, 0, "zsh", true),
+            tab_named(2, 1, "b", false),
+        ]);
+        assert_eq!(
+            snap.plan_title(&config, Some(at(1, 4))),
+            vec![TitleOp::Rename(4, "\u{200b}P · [zsh] · b".into())]
         );
     }
 }
