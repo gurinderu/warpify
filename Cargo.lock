@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "warpify-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "tracing",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "warpify-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "tracing",
@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "warpify-install"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "kdl",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "warpify-plugin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "tracing",
@@ -2503,7 +2503,7 @@ dependencies = [
 
 [[package]]
 name = "warpify-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "warpify-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "warpify-telemetry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tracing-subscriber",
 ]
