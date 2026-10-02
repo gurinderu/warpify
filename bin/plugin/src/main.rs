@@ -7,7 +7,7 @@ use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
 use warpify_session::{
     departed, on_tabs, plan_bind, tab_index, BindStep, Config, ConnectAction, ConnectStep,
-    Correction, Focus, Internal, Snapshot, TabSnapshot, TitleOp, INTERNAL_PIPE,
+    Correction, Focus, Focused, Internal, Snapshot, TabSnapshot, TitleOp, INTERNAL_PIPE,
 };
 use zellij_tile::prelude::*;
 
@@ -86,7 +86,11 @@ impl ZellijPlugin for Warpify {
                 self.broadcast_if_changed();
                 self.refresh_title();
             }
-            Event::PaneUpdate(_) | Event::PermissionRequestResult(_) => self.refresh_title(),
+            Event::PaneUpdate(manifest) => {
+                self.session.apply_panes(pane_titles(&manifest));
+                self.refresh_title();
+            }
+            Event::PermissionRequestResult(_) => self.refresh_title(),
             Event::SessionUpdate(sessions, _) => {
                 let empty = sessions
                     .iter()
@@ -238,20 +242,21 @@ impl Warpify {
     }
 
     /// Keep the title in step: the own client's focused pane is named after the tab list, and a
-    /// pane that lost focus gets its own title back. The focused pane is asked of zellij, per
-    /// client: `PaneInfo::is_focused` in a `PaneUpdate` isn't (zellij-server 0.45.1,
-    /// `tab/mod.rs` `pane_infos`, no client id), while `get_focused_pane_info` answers for this
-    /// instance's client (`screen.rs` `GetFocusedPaneInfo`). Graph @nick/warpify, node #23.
+    /// pane it left gets its name back. The focused pane is asked of zellij, per client:
+    /// `PaneInfo::is_focused` in a `PaneUpdate` isn't (zellij-server 0.45.1, `tab/mod.rs`
+    /// `pane_infos`, no client id), while `get_focused_pane_info` answers for this instance's
+    /// client (`screen.rs` `GetFocusedPaneInfo`); an error leaves the title alone. The leader
+    /// also fixes the names of tabs that took a title for theirs. Graph @nick/warpify, node #23.
     fn refresh_title(&mut self) {
         if !self.config.title || !self.session.connected {
             return;
         }
         let focused = match get_focused_pane_info() {
-            Ok((tab, PaneId::Terminal(pane))) => Some(Focus { tab, pane }),
-            Ok(_) => None,
+            Ok((tab, PaneId::Terminal(pane))) => Focused::Terminal(Focus { tab, pane }),
+            Ok(_) => Focused::Other,
             Err(err) => {
                 tracing::debug!(%err, "no focused pane for the title");
-                None
+                Focused::Unknown
             }
         };
         for op in self.session.plan_title(&self.config, focused) {
@@ -265,6 +270,10 @@ impl Warpify {
                     rename_terminal_pane(pane, "");
                 }
             }
+        }
+        for (tab, name) in self.session.plan_tab_names(&self.config) {
+            tracing::debug!(tab, name, "title: tab name");
+            rename_tab_with_id(tab as u64, name);
         }
     }
 
@@ -364,6 +373,17 @@ fn send(pipe_id: &str, event: &WireEvent) {
         Ok(line) => cli_pipe_output(pipe_id, &format!("{line}\n")),
         Err(err) => tracing::error!(%err, ?event, "can't encode event"),
     }
+}
+
+/// The actual name of every terminal pane (the title it shows when it has no name).
+fn pane_titles(manifest: &PaneManifest) -> BTreeMap<u32, String> {
+    manifest
+        .panes
+        .values()
+        .flatten()
+        .filter(|pane| !pane.is_plugin)
+        .map(|pane| (pane.id, pane.title.clone()))
+        .collect()
 }
 
 fn tab_snapshot(tab: &TabInfo) -> TabSnapshot {

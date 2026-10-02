@@ -60,7 +60,9 @@ enum Cmd {
         #[arg(long, requires = "on_connect")]
         pin: bool,
         /// show the host and the session's tabs in the terminal title (what Warp shows as the
-        /// tab title); the plugin renames the client's focused pane
+        /// tab title). The plugin WRITES OVER the name of each client's focused pane (a name from
+        /// the user or a layout is overwritten while the pane is focused and cleared after), and
+        /// tabs with a default name get their names fixed
         #[arg(long)]
         title: bool,
         /// the title's first part; default: an emoji for the OS and the short host name

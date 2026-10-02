@@ -59,7 +59,10 @@ in
       enable = lib.mkEnableOption ''
         the host and the session's tabs in the terminal title: the plugin renames each client's
         focused pane to `<prefix> · <tab> · [<own tab>] · <tab>`, which zellij sends to the outer
-        terminal (what Warp shows as the tab title)
+        terminal (what Warp shows as the tab title). This writes over the focused pane's name:
+        a name the user or a layout gave a pane is overwritten while the pane is focused and
+        cleared after, and tabs with a default name get their names fixed (renamed to the name
+        they showed)
       '';
       prefix = lib.mkOption {
         type = lib.types.str;
