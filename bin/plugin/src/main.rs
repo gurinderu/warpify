@@ -6,8 +6,8 @@ use std::str::FromStr;
 use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
 use warpify_session::{
-    departed, on_tabs, plan_bind, tab_index, BindStep, Config, ConnectAction, Correction, Internal,
-    Snapshot, TabSnapshot, INTERNAL_PIPE,
+    departed, on_tabs, plan_bind, tab_index, BindStep, Config, ConnectAction, ConnectStep,
+    Correction, Internal, Snapshot, TabSnapshot, INTERNAL_PIPE,
 };
 use zellij_tile::prelude::*;
 
@@ -103,6 +103,11 @@ impl ZellijPlugin for Warpify {
                     );
                     self.freeze();
                 }
+                // The same reply answers the on-connect question (a freeze reset it).
+                if let Some(action) = self.session.on_connect_clients(&self.config, clients.len()) {
+                    self.act_on_connect(action);
+                    self.broadcast_if_changed();
+                }
             }
             Event::Timer(_) => {
                 self.send_to_watchers(&WireEvent::Heartbeat);
@@ -196,9 +201,23 @@ impl Warpify {
     /// `on_connect`: bind a newly connected client, from its first tab update after `load` or the
     /// one that un-freezes the instance (graph @nick/warpify, node #16).
     fn serve_connect(&mut self) {
-        let client = self.session.own_client;
         match self.session.on_connect(&self.config) {
-            Some(ConnectAction::BoundCurrent(tab)) => {
+            ConnectStep::AskClients => {
+                tracing::debug!(
+                    client = self.session.own_client,
+                    "on connect: asking who is connected"
+                );
+                list_clients();
+            }
+            ConnectStep::Act(action) => self.act_on_connect(action),
+            ConnectStep::Nothing => {}
+        }
+    }
+
+    fn act_on_connect(&mut self, action: ConnectAction) {
+        let client = self.session.own_client;
+        match action {
+            ConnectAction::BoundCurrent(tab) => {
                 tracing::info!(
                     client,
                     tab,
@@ -206,11 +225,10 @@ impl Warpify {
                     "on connect: bound the tab it is on"
                 );
             }
-            Some(ConnectAction::NewTab { pin }) => {
+            ConnectAction::NewTab { pin } => {
                 tracing::info!(client, pin, "on connect: new tab");
                 self.bind(&warpify_proto::Target::New(None), pin);
             }
-            None => {}
         }
     }
 

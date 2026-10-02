@@ -102,9 +102,36 @@ pub struct Snapshot {
     /// client whose focused pane isn't in the layout dump (e.g. in the scrollback editor):
     /// accepted residual risk (graph @nick/warpify, node #11).
     pub zero_pending: bool,
-    /// `on_connect` has been acted on for this client's lifetime; `freeze` clears it, so the
-    /// next client to take the id is served again (graph @nick/warpify, node #16).
-    pub connect_served: bool,
+    /// Where `on_connect` stands for this client's lifetime; `freeze` resets it, so the next
+    /// client to take the id is served again (graph @nick/warpify, node #16).
+    pub connect: ConnectPhase,
+}
+
+/// The steps of serving a newly connected client. A tab update can't tell whether the client is
+/// alone (zellij caches events per plugin instance regardless of client, so a view of another
+/// client from before this one registered looks like "alone"), so the first update only asks
+/// for the client list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectPhase {
+    /// Nothing seen yet since the start or the last freeze.
+    #[default]
+    Idle,
+    /// The client list was asked for (`connect_pending`); its reply decides.
+    Pending,
+    /// The reply said this many clients, but the own client's tab isn't known yet: decide on a
+    /// later tab update with the same count.
+    AwaitingTab(usize),
+    /// Acted on.
+    Served,
+}
+
+/// What a tab update means for serving the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectStep {
+    Nothing,
+    /// Call `list_clients()`; the reply goes to [`Snapshot::on_connect_clients`].
+    AskClients,
+    Act(ConnectAction),
 }
 
 impl Default for Snapshot {
@@ -116,7 +143,7 @@ impl Default for Snapshot {
             pending: None,
             connected: true,
             zero_pending: false,
-            connect_served: false,
+            connect: ConnectPhase::Idle,
         }
     }
 }
@@ -347,7 +374,7 @@ impl Snapshot {
     pub fn freeze(&mut self) {
         self.connected = false;
         self.zero_pending = false;
-        self.connect_served = false;
+        self.connect = ConnectPhase::Idle;
         self.binding = None;
         self.pending = None;
     }
@@ -367,32 +394,56 @@ impl Snapshot {
 
     /// Serve a newly connected client, once per client lifetime: call after [`Self::apply_tabs`],
     /// which the first tab update after `load` and the one that un-freezes the instance both
-    /// are. With `on_connect = new_tab`: a client that is alone in the session binds to the tab
-    /// it is on (the binding is recorded here); with others around it gets a new tab. `None`
-    /// when there is nothing to do or the update can't be trusted yet (tried again next update):
-    /// the client isn't on a tab, or a tab lists the own client among the *other* ones. zellij
-    /// replays to a freshly loaded instance the updates it cached while loading, and those are
-    /// the first client's, so the first update a new instance sees can be another client's view
-    /// (observed live in zellij 0.45.1; graph @nick/warpify, node #16).
-    pub fn on_connect(&mut self, config: &Config) -> Option<ConnectAction> {
-        if config.on_connect == OnConnect::None || self.connect_served {
+    /// are. With `on_connect = new_tab` the first such update acts on nothing: it only
+    /// asks for the client list ([`ConnectStep::AskClients`]), since a tab update can't say
+    /// whether this client is alone (zellij replays cached events of other clients to a fresh
+    /// instance; observed live in zellij 0.45.1; graph @nick/warpify, node #16). The reply is
+    /// [`Self::on_connect_clients`]'s; if it arrived before the own tab was known, the next
+    /// update decides here.
+    pub fn on_connect(&mut self, config: &Config) -> ConnectStep {
+        if config.on_connect == OnConnect::None {
+            return ConnectStep::Nothing;
+        }
+        match self.connect {
+            ConnectPhase::Idle => {
+                self.connect = ConnectPhase::Pending;
+                ConnectStep::AskClients
+            }
+            ConnectPhase::AwaitingTab(count) => self
+                .decide_connect(config.pin, count)
+                .map_or(ConnectStep::Nothing, ConnectStep::Act),
+            ConnectPhase::Pending | ConnectPhase::Served => ConnectStep::Nothing,
+        }
+    }
+
+    /// The `ListClients` reply as an answer to [`Self::on_connect`]'s question: more than one
+    /// client means a new tab; otherwise (an empty list is the own client missing from an
+    /// incomplete list) bind the tab the own client is on, waiting for the next update if it
+    /// isn't known yet. A reply nobody asked for does nothing.
+    pub fn on_connect_clients(
+        &mut self,
+        config: &Config,
+        client_count: usize,
+    ) -> Option<ConnectAction> {
+        if self.connect != ConnectPhase::Pending || config.on_connect == OnConnect::None {
             return None;
         }
-        if self
-            .tabs
-            .iter()
-            .any(|t| t.other_clients.contains(&self.own_client))
-        {
-            return None;
+        self.decide_connect(config.pin, client_count).or_else(|| {
+            self.connect = ConnectPhase::AwaitingTab(client_count);
+            None
+        })
+    }
+
+    /// Act on the client count, if the answer is available now: marks the client served.
+    fn decide_connect(&mut self, pin: bool, client_count: usize) -> Option<ConnectAction> {
+        if client_count > 1 {
+            self.connect = ConnectPhase::Served;
+            return Some(ConnectAction::NewTab { pin });
         }
         let tab = self.tabs.iter().find(|t| t.active)?.id;
-        self.connect_served = true;
-        if self.client_ids().len() == 1 {
-            self.binding = Some(Binding::new(tab, config.pin).seen_in(&self.tabs));
-            Some(ConnectAction::BoundCurrent(tab))
-        } else {
-            Some(ConnectAction::NewTab { pin: config.pin })
-        }
+        self.connect = ConnectPhase::Served;
+        self.binding = Some(Binding::new(tab, pin).seen_in(&self.tabs));
+        Some(ConnectAction::BoundCurrent(tab))
     }
 
     /// A `SessionUpdate` reported zero connected clients: whether to ask `list_clients` to
@@ -994,97 +1045,134 @@ mod tests {
     };
 
     #[test]
-    fn first_update_alone_binds_the_current_tab() {
+    fn first_update_only_asks_for_the_client_list() {
+        // Whatever the update shows, alone or not: no action on it.
+        for mut snap in [with_clients(1, &[]), with_clients(2, &[1])] {
+            assert_eq!(snap.on_connect(&NEW_TAB), ConnectStep::AskClients);
+            assert_eq!(snap.connect, ConnectPhase::Pending);
+            assert_eq!(snap.binding, None);
+        }
+    }
+
+    #[test]
+    fn several_clients_in_the_list_ask_for_a_new_tab() {
         let mut snap = with_clients(1, &[]);
         let config = Config {
             pin: true,
             ..NEW_TAB
         };
+        snap.on_connect(&config);
         assert_eq!(
-            snap.on_connect(&config),
-            Some(ConnectAction::BoundCurrent(0))
-        );
-        assert_eq!(
-            snap.binding,
-            Some(Binding {
-                tab: 0,
-                pin: true,
-                seen: true
-            })
-        );
-    }
-
-    #[test]
-    fn first_update_with_others_asks_for_a_new_tab() {
-        let mut snap = with_clients(2, &[1]);
-        let config = Config {
-            pin: true,
-            ..NEW_TAB
-        };
-        assert_eq!(
-            snap.on_connect(&config),
+            snap.on_connect_clients(&config, 2),
             Some(ConnectAction::NewTab { pin: true })
         );
+        assert_eq!(snap.connect, ConnectPhase::Served);
         assert_eq!(snap.binding, None);
     }
 
     #[test]
-    fn later_updates_do_nothing() {
-        for mut snap in [with_clients(1, &[]), with_clients(2, &[1])] {
-            assert!(snap.on_connect(&NEW_TAB).is_some());
-            assert_eq!(snap.on_connect(&NEW_TAB), None);
+    fn a_lone_client_binds_the_tab_it_is_on() {
+        // An empty list is the own client missing from an incomplete list: same as one.
+        for count in [1, 0] {
+            let mut snap = with_clients(1, &[]);
+            let config = Config {
+                pin: true,
+                ..NEW_TAB
+            };
+            snap.on_connect(&config);
+            assert_eq!(
+                snap.on_connect_clients(&config, count),
+                Some(ConnectAction::BoundCurrent(0))
+            );
+            assert_eq!(
+                snap.binding,
+                Some(Binding {
+                    tab: 0,
+                    pin: true,
+                    seen: true
+                })
+            );
+            assert_eq!(snap.connect, ConnectPhase::Served);
         }
     }
 
     #[test]
-    fn unfreezing_serves_the_next_client_again() {
+    fn a_stale_view_of_another_client_doesnt_make_it_alone() {
+        // The cached update shows no other clients, but the list has two.
+        let mut snap = with_clients(2, &[]);
+        assert_eq!(snap.on_connect(&NEW_TAB), ConnectStep::AskClients);
+        assert_eq!(
+            snap.on_connect_clients(&NEW_TAB, 2),
+            Some(ConnectAction::NewTab { pin: false })
+        );
+    }
+
+    #[test]
+    fn later_updates_do_nothing() {
+        let mut snap = with_clients(1, &[]);
+        snap.on_connect(&NEW_TAB);
+        assert_eq!(snap.on_connect(&NEW_TAB), ConnectStep::Nothing);
+        snap.on_connect_clients(&NEW_TAB, 1);
+        assert_eq!(snap.on_connect(&NEW_TAB), ConnectStep::Nothing);
+        assert_eq!(snap.on_connect_clients(&NEW_TAB, 2), None);
+    }
+
+    #[test]
+    fn unfreezing_asks_again() {
         let mut snap = with_clients(2, &[1]);
-        assert!(snap.on_connect(&NEW_TAB).is_some());
+        snap.on_connect(&NEW_TAB);
+        snap.on_connect_clients(&NEW_TAB, 2);
         snap.freeze();
         snap.apply_tabs(vec![tab(0, 0, true, &[])]);
-        assert_eq!(
-            snap.on_connect(&NEW_TAB),
-            Some(ConnectAction::BoundCurrent(0))
-        );
+        assert_eq!(snap.on_connect(&NEW_TAB), ConnectStep::AskClients);
     }
 
     #[test]
     fn on_connect_none_does_nothing() {
         let mut snap = with_clients(1, &[]);
-        assert_eq!(snap.on_connect(&Config::default()), None);
+        assert_eq!(snap.on_connect(&Config::default()), ConnectStep::Nothing);
+        assert_eq!(snap.on_connect_clients(&Config::default(), 1), None);
+        assert_eq!(snap.connect, ConnectPhase::Idle);
         assert_eq!(snap.binding, None);
     }
 
     #[test]
-    fn an_update_that_is_another_clients_view_is_skipped() {
-        // Client 2's instance first sees a replay of client 1's update: client 2 shows up as
-        // "another" client and client 1 is missing.
-        let mut snap = Snapshot {
-            own_client: 2,
-            tabs: vec![tab(0, 0, true, &[2])],
-            ..Snapshot::default()
-        };
-        assert_eq!(snap.on_connect(&NEW_TAB), None);
-        assert!(!snap.connect_served);
-        snap.apply_tabs(vec![tab(0, 0, true, &[1])]);
-        assert_eq!(
-            snap.on_connect(&NEW_TAB),
-            Some(ConnectAction::NewTab { pin: false })
-        );
+    fn a_reply_without_a_question_does_nothing() {
+        let mut snap = with_clients(1, &[]);
+        assert_eq!(snap.on_connect_clients(&NEW_TAB, 1), None);
+        assert_eq!(snap.connect, ConnectPhase::Idle);
+        assert_eq!(snap.binding, None);
     }
 
     #[test]
-    fn a_client_not_on_any_tab_yet_waits_for_the_next_update() {
+    fn a_reply_before_the_own_tab_is_known_waits_for_the_next_update() {
         let mut snap = Snapshot {
             own_client: 1,
             tabs: vec![tab(0, 0, false, &[2])],
             ..Snapshot::default()
         };
-        assert_eq!(snap.on_connect(&NEW_TAB), None);
-        snap.apply_tabs(vec![tab(0, 0, true, &[2])]);
+        assert_eq!(snap.on_connect(&NEW_TAB), ConnectStep::AskClients);
+        assert_eq!(snap.on_connect_clients(&NEW_TAB, 1), None);
+        assert_eq!(snap.connect, ConnectPhase::AwaitingTab(1));
+        assert_eq!(snap.on_connect(&NEW_TAB), ConnectStep::Nothing);
+        snap.apply_tabs(vec![tab(0, 0, true, &[])]);
         assert_eq!(
             snap.on_connect(&NEW_TAB),
-            Some(ConnectAction::NewTab { pin: false })
+            ConnectStep::Act(ConnectAction::BoundCurrent(0))
+        );
+        assert_eq!(snap.connect, ConnectPhase::Served);
+    }
+
+    #[test]
+    fn one_reply_answers_both_the_zero_check_and_the_connect_question() {
+        let mut snap = with_clients(1, &[]);
+        snap.on_connect(&NEW_TAB);
+        assert!(snap.on_zero_clients());
+        // A non-empty list refutes the zero and serves the client.
+        assert!(!snap.on_client_list(1));
+        assert_eq!(
+            snap.on_connect_clients(&NEW_TAB, 1),
+            Some(ConnectAction::BoundCurrent(0))
         );
     }
 }

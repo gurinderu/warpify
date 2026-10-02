@@ -3,7 +3,8 @@
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::error::ErrorKind;
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use warpify_client::SessionTarget;
 use warpify_proto::{ClientId, Event, Request, State, TabId, Target};
 
@@ -117,8 +118,31 @@ impl TargetArgs {
     }
 }
 
+impl Cli {
+    /// Parse `args`, then reject what a single clap rule can't: `--pin` with `--on-connect none`.
+    fn parse_checked<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Self::try_parse_from(args)?;
+        if let Cmd::Install {
+            on_connect: Some(OnConnect::None),
+            pin: true,
+            ..
+        } = cli.command
+        {
+            return Err(Self::command().error(
+                ErrorKind::ArgumentConflict,
+                "--pin needs `--on-connect new-tab`: with `--on-connect none` nothing is bound",
+            ));
+        }
+        Ok(cli)
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_checked(std::env::args_os()).unwrap_or_else(|err| err.exit());
     let level = match cli.verbose {
         0 => "warn",
         1 => "debug",
@@ -289,6 +313,26 @@ mod tests {
         assert!(on_connect == Some(OnConnect::None));
         assert!(parse(&["--on-connect", "new_tab"]).is_err());
         assert!(parse(&["--pin"]).is_err());
+        assert!(Cli::parse_checked([
+            "warpify",
+            "install",
+            "zellij",
+            "--on-connect",
+            "new-tab",
+            "--pin"
+        ])
+        .is_ok());
+        let err = Cli::parse_checked([
+            "warpify",
+            "install",
+            "zellij",
+            "--on-connect",
+            "none",
+            "--pin",
+        ])
+        .err()
+        .expect("none + pin is rejected");
+        assert!(err.to_string().contains("--pin needs"), "{err}");
         assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij", "--pin"]).is_err());
     }
 
