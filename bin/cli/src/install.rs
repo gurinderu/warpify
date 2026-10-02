@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use warpify_install::{
     ensure_not_managed, execute, grant_permissions as grant, plan_install, plan_uninstall,
-    probe_config, Action, Dirs, EnvVars, Paths, Plan, Source, UreqFetcher,
+    probe_config, Action, Dirs, EnvVars, Paths, Plan, PluginOptions, Source, UreqFetcher,
 };
 
 use crate::{Integration, Outcome};
@@ -17,7 +17,13 @@ const UNINSTALL_PENDING: &str = "the plugin file stays and new zellij sessions s
 const UNINSTALLED: &str =
     "new zellij sessions won't load the plugin; running sessions keep it until restarted";
 
-pub fn install(integration: Integration, wasm: Option<PathBuf>, dry_run: bool) -> Outcome {
+pub fn install(
+    integration: Integration,
+    wasm: Option<PathBuf>,
+    new_tab_on_connect: bool,
+    pin: bool,
+    dry_run: bool,
+) -> Outcome {
     let Integration::Zellij = integration;
     let paths = Paths::resolve(&EnvVars::from_process(), &Dirs::from_system()?)?;
     ensure_not_managed(&paths.wasm)?;
@@ -28,7 +34,11 @@ pub fn install(integration: Integration, wasm: Option<PathBuf>, dry_run: bool) -
         },
     };
     let access = probe_config(&paths.config);
-    let plan = plan_install(&paths, &source, &access)?;
+    let options = PluginOptions {
+        new_tab_on_connect,
+        pin,
+    };
+    let plan = plan_install(&paths, &source, options, &access)?;
     finish(&plan, dry_run, closing(&plan, true))
 }
 
@@ -105,7 +115,12 @@ mod tests {
     #[test]
     fn the_summary_follows_what_happened() {
         let src = Source::Local("/w.wasm".into());
-        let line = |a: &ConfigAccess| closing(&plan_install(&paths(), &src, a).unwrap(), true);
+        let line = |a: &ConfigAccess| {
+            closing(
+                &plan_install(&paths(), &src, PluginOptions::default(), a).unwrap(),
+                true,
+            )
+        };
         assert_eq!(line(&ConfigAccess::Editable), INSTALLED);
         let by_hand = line(&manual(Seen::Missing));
         assert_eq!(by_hand, INSTALLED_BY_HAND);

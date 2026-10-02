@@ -1,10 +1,10 @@
 //! `warpify` — talks to the warpify zellij plugin of a zellij session over `zellij pipe`.
 
 use std::io::{self, BufWriter, Write};
-use std::os::unix::process::CommandExt;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::error::ErrorKind;
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use warpify_client::SessionTarget;
 use warpify_proto::{ClientId, Event, Request, State, TabId, Target};
 
@@ -14,6 +14,15 @@ mod install;
 #[derive(Clone, Copy, ValueEnum)]
 enum Integration {
     Zellij,
+}
+
+/// What the plugin does for a client that connects (`install zellij --on-connect`).
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OnConnect {
+    /// leave the client where zellij put it
+    None,
+    /// a client alone in the session when it connects stays on its tab, any other gets a new tab of its own
+    NewTab,
 }
 
 /// Talks to the warpify zellij plugin of a session (the current one, or --session) over
@@ -43,6 +52,13 @@ enum Cmd {
         /// use this local plugin build instead of downloading the release
         #[arg(long, value_name = "PATH")]
         wasm: Option<std::path::PathBuf>,
+        /// what the plugin does for a client that connects; written into the plugin's
+        /// `load_plugins` entry, so a re-install without it resets to `none`
+        #[arg(long, value_enum, value_name = "ACTION")]
+        on_connect: Option<OnConnect>,
+        /// keep a client bound on connect on its tab (needs --on-connect new-tab)
+        #[arg(long, requires = "on_connect")]
+        pin: bool,
         /// print what would be done, change nothing
         #[arg(long)]
         dry_run: bool,
@@ -73,26 +89,6 @@ enum Cmd {
         #[arg(long)]
         pin: bool,
     },
-    /// start a zellij client in a session (default `warpify`, created if missing) and bind it
-    #[command(mut_group("target", |g| g.required(false)))]
-    Attach {
-        #[command(flatten)]
-        target: TargetArgs,
-        /// send the client back to its tab whenever it wanders off
-        #[arg(long)]
-        pin: bool,
-    },
-    /// bind the next client that connects (spawned by `attach`)
-    #[command(name = "__bind-new", hide = true, mut_group("target", |g| g.required(false)))]
-    BindNew {
-        /// comma-separated ids of the clients already connected
-        #[arg(long, value_name = "IDS", default_value = "")]
-        known: String,
-        #[command(flatten)]
-        target: TargetArgs,
-        #[arg(long)]
-        pin: bool,
-    },
 }
 
 /// Where a bind puts the client; exactly one.
@@ -111,7 +107,7 @@ struct TargetArgs {
 }
 
 impl TargetArgs {
-    /// The chosen target; a fresh unnamed tab when none was given (`attach`).
+    /// The chosen target.
     fn target(&self) -> Target {
         match (self.tab_id, &self.name, &self.new) {
             (Some(id), _, _) => Target::Id(id),
@@ -122,30 +118,39 @@ impl TargetArgs {
     }
 }
 
-/// The flags that spell `target` for a re-run of this binary.
-fn target_flags(target: &Target) -> Vec<String> {
-    match target {
-        Target::Id(id) => vec!["--tab-id".into(), id.to_string()],
-        Target::Name(name) => vec![format!("--name={name}")],
-        Target::New(None) => vec!["--new".into()],
-        Target::New(Some(name)) => vec![format!("--new={name}")],
+impl Cli {
+    /// Parse `args`, then reject what a single clap rule can't: `--pin` with `--on-connect none`.
+    fn parse_checked<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Self::try_parse_from(args)?;
+        if let Cmd::Install {
+            on_connect: Some(OnConnect::None),
+            pin: true,
+            ..
+        } = cli.command
+        {
+            return Err(Self::command().error(
+                ErrorKind::ArgumentConflict,
+                "--pin needs `--on-connect new-tab`: with `--on-connect none` nothing is bound",
+            ));
+        }
+        Ok(cli)
     }
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_checked(std::env::args_os()).unwrap_or_else(|err| err.exit());
     let level = match cli.verbose {
         0 => "warn",
         1 => "debug",
         _ => "trace",
     };
-    if matches!(cli.command, Cmd::BindNew { .. }) {
-        init_helper_log(cli.verbose);
-    } else {
-        warpify_telemetry::init(&format!(
-            "warpify={level},warpify_client={level},warpify_session={level}"
-        ));
-    }
+    warpify_telemetry::init(&format!(
+        "warpify={level},warpify_client={level},warpify_session={level}"
+    ));
     let result = match cli.command {
         Cmd::State => run(&Request::State, &session_target(cli.session)),
         Cmd::Watch => run(&Request::Watch, &session_target(cli.session)),
@@ -157,8 +162,16 @@ fn main() -> ExitCode {
         Cmd::Install {
             integration,
             wasm,
+            on_connect,
+            pin,
             dry_run,
-        } => install::install(integration, wasm, dry_run),
+        } => install::install(
+            integration,
+            wasm,
+            on_connect == Some(OnConnect::NewTab),
+            pin,
+            dry_run,
+        ),
         Cmd::Uninstall {
             integration,
             dry_run,
@@ -167,10 +180,6 @@ fn main() -> ExitCode {
             integration,
             wasm_path,
         } => install::grant_permissions(integration, &wasm_path),
-        Cmd::Attach { target, pin } => attach(cli.session.as_deref(), &target.target(), pin),
-        Cmd::BindNew { known, target, pin } => {
-            bind_new(cli.session.as_deref(), &known, &target.target(), pin)
-        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -179,31 +188,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// The helper has no terminal: its diagnostics (at least info) go to the attach log file.
-fn init_helper_log(verbose: u8) {
-    let level = match verbose {
-        0 => "info",
-        1 => "debug",
-        _ => "trace",
-    };
-    let filter = format!("warpify={level},warpify_client={level},warpify_session={level}");
-    match attach_log_path() {
-        Some(path) => {
-            if let Err(err) = warpify_telemetry::init_file(&filter, &path) {
-                eprintln!("warpify: can't open {}: {err}", path.display());
-            }
-        }
-        None => warpify_telemetry::init(&filter),
-    }
-}
-
-fn attach_log_path() -> Option<std::path::PathBuf> {
-    warpify_client::attach_log_path(
-        std::env::var("XDG_STATE_HOME").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-    )
 }
 
 fn session_target(named: Option<String>) -> SessionTarget {
@@ -221,72 +205,6 @@ fn bind(session: &SessionTarget, client: ClientId, target: &Target, pin: bool) -
         tab.id
     )?;
     Ok(())
-}
-
-/// Snapshots the session's clients, starts the detached `__bind-new` helper, then becomes
-/// `zellij attach --create` (graph @nick/warpify, node #16).
-fn attach(session: Option<&str>, target: &Target, pin: bool) -> Outcome {
-    warpify_client::check_outside_zellij(std::env::var("ZELLIJ_SESSION_NAME").ok().as_deref())?;
-    let session = warpify_client::attach_session(session);
-    let known: Vec<String> =
-        match warpify_client::fetch_state(&SessionTarget::Named(session.into())) {
-            Ok(state) => state.clients.iter().map(|c| c.id.to_string()).collect(),
-            Err(err) => {
-                tracing::debug!(%err, "no state before attach; assuming no clients");
-                Vec::new()
-            }
-        };
-    let mut helper = Command::new(std::env::current_exe()?);
-    helper
-        .args(["__bind-new", "-s", session])
-        .arg(format!("--known={}", known.join(",")))
-        .args(target_flags(target))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    if pin {
-        helper.arg("--pin");
-    }
-    helper.spawn()?;
-    match attach_log_path() {
-        Some(path) => eprintln!(
-            "warpify: binding the new client in the background; log: {}",
-            path.display()
-        ),
-        None => eprintln!("warpify: binding the new client in the background; log: unavailable"),
-    }
-    let err = Command::new("zellij")
-        .args(["attach", "--create", session])
-        .exec();
-    Err(format!("can't run zellij: {err}").into())
-}
-
-/// The helper: waits for the new client, binds it and confirms; the verdict goes to the log.
-fn bind_new(session: Option<&str>, known: &str, target: &Target, pin: bool) -> Outcome {
-    let result = bind_new_inner(session, known, target, pin);
-    match &result {
-        Ok(line) => tracing::info!("{line}"),
-        Err(err) => tracing::error!("{err}"),
-    }
-    result.map(|_| ())
-}
-
-fn bind_new_inner(
-    session: Option<&str>,
-    known: &str,
-    target: &Target,
-    pin: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let session = SessionTarget::Named(warpify_client::attach_session(session).into());
-    let known = warpify_client::parse_known(known)?;
-    let client = warpify_client::wait_for_new_client(&session, &known)?;
-    tracing::debug!(client, "binding the new client");
-    let tab = warpify_client::bind_and_confirm(&session, client, target, pin)?;
-    Ok(format!(
-        "client {client} is on tab \"{}\" (id {})",
-        tab.name, tab.id
-    ))
 }
 
 fn run(request: &Request, target: &SessionTarget) -> Result<(), Box<dyn std::error::Error>> {
@@ -354,18 +272,68 @@ mod tests {
 
     #[test]
     fn install_parses_integration_and_flags() {
-        let Cmd::Install { wasm, dry_run, .. } =
-            Cli::try_parse_from(["warpify", "install", "zellij", "--wasm", "/w", "--dry-run"])
-                .unwrap()
-                .command
+        let Cmd::Install {
+            wasm,
+            dry_run,
+            on_connect,
+            pin,
+            ..
+        } = Cli::try_parse_from(["warpify", "install", "zellij", "--wasm", "/w", "--dry-run"])
+            .unwrap()
+            .command
         else {
             panic!("not install")
         };
         assert_eq!(wasm, Some("/w".into()));
         assert!(dry_run);
+        assert!(on_connect.is_none() && !pin);
         assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij"]).is_ok());
         assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij", "--wasm", "x"]).is_err());
         assert!(Cli::try_parse_from(["warpify", "install", "tmux"]).is_err());
+    }
+
+    #[test]
+    fn install_takes_on_connect_and_pin() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["warpify", "install", "zellij"].iter().chain(args))
+        };
+        let Cmd::Install {
+            on_connect, pin, ..
+        } = parse(&["--on-connect", "new-tab", "--pin"])
+            .unwrap()
+            .command
+        else {
+            panic!("not install")
+        };
+        assert!(on_connect == Some(OnConnect::NewTab) && pin);
+        let Cmd::Install { on_connect, .. } = parse(&["--on-connect", "none"]).unwrap().command
+        else {
+            panic!("not install")
+        };
+        assert!(on_connect == Some(OnConnect::None));
+        assert!(parse(&["--on-connect", "new_tab"]).is_err());
+        assert!(parse(&["--pin"]).is_err());
+        assert!(Cli::parse_checked([
+            "warpify",
+            "install",
+            "zellij",
+            "--on-connect",
+            "new-tab",
+            "--pin"
+        ])
+        .is_ok());
+        let err = Cli::parse_checked([
+            "warpify",
+            "install",
+            "zellij",
+            "--on-connect",
+            "none",
+            "--pin",
+        ])
+        .err()
+        .expect("none + pin is rejected");
+        assert!(err.to_string().contains("--pin needs"), "{err}");
+        assert!(Cli::try_parse_from(["warpify", "uninstall", "zellij", "--pin"]).is_err());
     }
 
     #[test]
@@ -426,46 +394,6 @@ mod tests {
             panic!("not bind")
         };
         assert_eq!(target.target(), Target::Id(4));
-    }
-
-    #[test]
-    fn attach_target_is_optional_and_defaults_to_new() {
-        let Cmd::Attach { target, pin } =
-            Cli::try_parse_from(["warpify", "attach"]).unwrap().command
-        else {
-            panic!("not attach")
-        };
-        assert!(!pin);
-        assert_eq!(target.target(), Target::New(None));
-        assert!(Cli::try_parse_from(["warpify", "attach", "--name", "a", "--new"]).is_err());
-    }
-
-    #[test]
-    fn helper_flags_round_trip_even_for_names_starting_with_a_dash() {
-        for target in [
-            Target::Id(3),
-            Target::Name("a b".into()),
-            Target::Name("-x".into()),
-            Target::Name("--new".into()),
-            Target::New(None),
-            Target::New(Some("n".into())),
-            Target::New(Some("-n".into())),
-            Target::New(Some("--pin".into())),
-        ] {
-            let mut argv = vec!["warpify".to_owned(), "__bind-new".to_owned()];
-            argv.push("--known=1,2".into());
-            argv.extend(target_flags(&target));
-            let Cmd::BindNew {
-                known,
-                target: parsed,
-                ..
-            } = Cli::try_parse_from(argv).unwrap().command
-            else {
-                panic!("not bind-new")
-            };
-            assert_eq!(known, "1,2");
-            assert_eq!(parsed.target(), target);
-        }
     }
 
     #[test]

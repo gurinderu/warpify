@@ -67,9 +67,11 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
             merge_permissions(t, wasm, PERMISSIONS)
         }),
         Action::RemovePermissions { file, wasm } => remove_permissions_file(file, wasm),
-        Action::AddLoadPlugin { file, entry } => {
-            edit_config(file, true, |t| edit_install(t, entry))
-        }
+        Action::AddLoadPlugin {
+            file,
+            entry,
+            options,
+        } => edit_config(file, true, |t| edit_install(t, entry, *options)),
         Action::RemoveLoadPlugin { file, entry } => {
             edit_config(file, false, |t| edit_uninstall(t, entry))
         }
@@ -81,10 +83,11 @@ fn run(action: &Action, fetcher: &dyn Fetcher) -> Result<String> {
         Action::Manual {
             file,
             entry,
+            options,
             why,
             adding,
             seen,
-        } => Ok(manual_advice(file, seen, entry, *adding, why)),
+        } => Ok(manual_advice(file, seen, entry, *options, *adding, why)),
     }
 }
 
@@ -200,7 +203,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::plan::{plan_install, plan_uninstall, ConfigAccess, Seen, Source};
+    use crate::plan::{plan_install, plan_uninstall, ConfigAccess, PluginOptions, Seen, Source};
     use crate::Paths;
 
     struct Fake(HashMap<String, Vec<u8>>, RefCell<Vec<String>>);
@@ -264,7 +267,8 @@ mod tests {
         let rel = Source::Release {
             version: "1.2.3".into(),
         };
-        let plan = plan_install(&p, &rel, &ConfigAccess::Editable).unwrap();
+        let plan =
+            plan_install(&p, &rel, PluginOptions::default(), &ConfigAccess::Editable).unwrap();
         let bad = fake(b"abd", ABC);
         assert!(execute(&plan, &bad)
             .unwrap_err()
@@ -284,7 +288,13 @@ mod tests {
         std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
         std::fs::write(&p.config, "theme \"x\"\n").unwrap();
         let none = Fake(HashMap::new(), RefCell::default());
-        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
+        let plan = plan_install(
+            &p,
+            &Source::Local(local),
+            PluginOptions::default(),
+            &ConfigAccess::Editable,
+        )
+        .unwrap();
         let first = execute(&plan, &none).unwrap();
         assert!(first[2].contains("original saved as"), "{first:?}");
         let (cfg1, perm1) = (read(&p.config), read(&p.permissions));
@@ -317,7 +327,13 @@ mod tests {
         let (t, p) = sandbox();
         let local = t.path().join("l.wasm");
         std::fs::write(&local, b"w").unwrap();
-        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
+        let plan = plan_install(
+            &p,
+            &Source::Local(local),
+            PluginOptions::default(),
+            &ConfigAccess::Editable,
+        )
+        .unwrap();
         execute(&plan, &Fake(HashMap::new(), RefCell::default())).unwrap();
         let entry = entry_for(&p.wasm).unwrap();
         assert_eq!(
@@ -333,7 +349,13 @@ mod tests {
         let local = t.path().join("l.wasm");
         std::fs::write(&local, b"w").unwrap();
         let none = Fake(HashMap::new(), RefCell::default());
-        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
+        let plan = plan_install(
+            &p,
+            &Source::Local(local),
+            PluginOptions::default(),
+            &ConfigAccess::Editable,
+        )
+        .unwrap();
         let first = execute(&plan, &none).unwrap();
         assert!(first[2].starts_with("created config"), "{first:?}");
         assert!(read(&p.config).starts_with("// created by warpify install\n"));
@@ -352,7 +374,13 @@ mod tests {
         std::fs::write(&local, b"w").unwrap();
         std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
         let none = Fake(HashMap::new(), RefCell::default());
-        let plan = plan_install(&p, &Source::Local(local), &ConfigAccess::Editable).unwrap();
+        let plan = plan_install(
+            &p,
+            &Source::Local(local),
+            PluginOptions::default(),
+            &ConfigAccess::Editable,
+        )
+        .unwrap();
         let bak = crate::fsutil::backup_path(&p.config);
         for user in ["", "a 1\n"] {
             std::fs::write(&p.config, user).unwrap();
@@ -407,7 +435,8 @@ mod tests {
         let local = t.path().join("l.wasm");
         std::fs::write(&local, b"w").unwrap();
         let access = manual("nix", Seen::Missing);
-        let plan = plan_install(&p, &Source::Local(local), &access).unwrap();
+        let plan =
+            plan_install(&p, &Source::Local(local), PluginOptions::default(), &access).unwrap();
         let lines = execute(&plan, &Fake(HashMap::new(), RefCell::default())).unwrap();
         assert!(
             lines[2].contains("\"zellij:link\"\n    \"file:"),
@@ -428,6 +457,7 @@ mod tests {
             &plan_install(
                 &p,
                 &Source::Local(local),
+                PluginOptions::default(),
                 &manual("nix", Seen::Text(held.into())),
             )
             .unwrap(),
@@ -527,7 +557,8 @@ mod tests {
         };
         assert!(matches!(seen, Seen::Unreadable(_)), "{seen:?}");
         let none = Fake(HashMap::new(), RefCell::default());
-        let plan = plan_install(&p, &Source::Local(local), &access).unwrap();
+        let plan =
+            plan_install(&p, &Source::Local(local), PluginOptions::default(), &access).unwrap();
         let out = execute(&plan, &none).unwrap();
         assert!(p.wasm.exists() && p.permissions.exists());
         let cfg = p.config.display().to_string();

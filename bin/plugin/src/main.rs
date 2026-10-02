@@ -6,8 +6,8 @@ use std::str::FromStr;
 use warpify_proto::ClientId;
 use warpify_proto::{Event as WireEvent, Request, State, TabId, HEARTBEAT_SECS, PIPE_NAME};
 use warpify_session::{
-    departed, on_tabs, plan_bind, tab_index, BindStep, Correction, Internal, Snapshot, TabSnapshot,
-    INTERNAL_PIPE,
+    departed, on_tabs, plan_bind, tab_index, BindStep, Config, ConnectAction, ConnectStep,
+    Correction, Internal, Snapshot, TabSnapshot, INTERNAL_PIPE,
 };
 use zellij_tile::prelude::*;
 
@@ -15,6 +15,8 @@ use zellij_tile::prelude::*;
 /// to all of them; an instance's tab switches move only its own client.
 #[derive(Default)]
 struct Warpify {
+    /// The `load_plugins` child block (graph @nick/warpify, node #16).
+    config: Config,
     session: Snapshot,
     /// CLI pipes held open by `watch`, by pipe id. zellij gives no signal when a CLI watcher goes
     /// away, so ids of dead pipes stay here (graph @nick/warpify, node #11).
@@ -45,17 +47,23 @@ fn requested_permissions() -> Vec<PermissionType> {
 }
 
 impl ZellijPlugin for Warpify {
-    fn load(&mut self, _configuration: BTreeMap<String, String>) {
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
         warpify_telemetry::init("warpify=info");
+        let (config, warnings) = Config::parse(&configuration);
+        for warning in warnings {
+            tracing::warn!("{warning}");
+        }
+        self.config = config;
         request_permission(&requested_permissions());
         subscribe(&[
             EventType::TabUpdate,
             // Reaches frozen instances too; reports 0 connected clients once the last client
             // has left (zellij-server `screen.rs` `remove_client`).
             EventType::SessionUpdate,
-            // Confirms a zero in `SessionUpdate`; the reply is addressed by (plugin, client) and
-            // reaches a departed client's instance (zellij-server `plugins/mod.rs`
-            // `ListClientsToPlugin`).
+            // Confirms a zero in `SessionUpdate`; zellij replays cached plugin events to every
+            // instance of the plugin when one loads, so a ListClients reply may reach an instance
+            // that didn't ask; the on-connect decision only uses the session-wide count, so that
+            // is harmless.
             EventType::ListClients,
             EventType::Timer,
             EventType::PermissionRequestResult,
@@ -70,6 +78,7 @@ impl ZellijPlugin for Warpify {
             Event::TabUpdate(tabs) => {
                 self.session
                     .apply_tabs(tabs.iter().map(tab_snapshot).collect());
+                self.serve_connect();
                 self.announce_departures();
                 self.correct_binding();
                 self.broadcast_if_changed();
@@ -94,6 +103,11 @@ impl ZellijPlugin for Warpify {
                         "no clients connected, freezing"
                     );
                     self.freeze();
+                }
+                // The same reply answers the on-connect question (a freeze reset it).
+                if let Some(action) = self.session.on_connect_clients(&self.config, clients.len()) {
+                    self.act_on_connect(action);
+                    self.broadcast_if_changed();
                 }
             }
             Event::Timer(_) => {
@@ -182,6 +196,40 @@ impl Warpify {
                 }
             }
             Err(err) => tracing::warn!(%err, payload, "bad internal message"),
+        }
+    }
+
+    /// `on_connect`: bind a newly connected client, from its first tab update after `load` or the
+    /// one that un-freezes the instance (graph @nick/warpify, node #16).
+    fn serve_connect(&mut self) {
+        match self.session.on_connect(&self.config) {
+            ConnectStep::AskClients => {
+                tracing::debug!(
+                    client = self.session.own_client,
+                    "on connect: asking who is connected"
+                );
+                list_clients();
+            }
+            ConnectStep::Act(action) => self.act_on_connect(action),
+            ConnectStep::Nothing => {}
+        }
+    }
+
+    fn act_on_connect(&mut self, action: ConnectAction) {
+        let client = self.session.own_client;
+        match action {
+            ConnectAction::BoundCurrent(tab) => {
+                tracing::info!(
+                    client,
+                    tab,
+                    pin = self.config.pin,
+                    "on connect: bound the tab it is on"
+                );
+            }
+            ConnectAction::NewTab { pin } => {
+                tracing::info!(client, pin, "on connect: new tab");
+                self.bind(&warpify_proto::Target::New(None), pin);
+            }
         }
     }
 
