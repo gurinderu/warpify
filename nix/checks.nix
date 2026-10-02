@@ -25,6 +25,13 @@ let
     ];
   };
   hm = mkHm { programs.zellij.enable = true; };
+  hmConnect = mkHm {
+    programs.zellij.enable = true;
+    programs.warpify = {
+      onConnect = "new-tab";
+      pin = true;
+    };
+  };
   # zellij disabled: home-manager writes no config.kdl, so the module must warn and not grant.
   hmNoZellij = mkHm { programs.zellij.enable = false; };
   zellijWarning = "programs.warpify needs programs.zellij.enable = true: home-manager only writes zellij's config.kdl (and so load_plugins) when zellij is enabled";
@@ -48,6 +55,19 @@ in
     grep -F "zellij will ask on first load" ${hm.activationPackage}/activate
     # the other OS's location is not used
     test ! -e ${lib.escapeShellArg "${hm.config.home-files}/${if pkgs.stdenv.hostPlatform.isDarwin then ".local/share/warpify" else "Library"}"}
+    touch $out
+  '';
+
+  home-manager-module-on-connect = pkgs.runCommand "warpify-hm-module-on-connect-check" { } ''
+    cfg=${hmConnect.config.home-files}/.config/zellij/config.kdl
+    cat "$cfg"
+    # the defaults write no children; the options are children of our entry
+    ! grep -F on_connect ${hm.config.home-files}/.config/zellij/config.kdl
+    ! grep -F 'pin ' ${hm.config.home-files}/.config/zellij/config.kdl
+    kids=$(grep -F -A3 ${lib.escapeShellArg ''"file:${abs}"''} "$cfg")
+    grep -F 'on_connect "new_tab"' <<<"$kids"
+    grep -F 'pin "true"' <<<"$kids"
+    ${if hmConnect.config.warnings == [ ] then "" else "echo ${lib.escapeShellArg (toString hmConnect.config.warnings)}; exit 1"}
     touch $out
   '';
 

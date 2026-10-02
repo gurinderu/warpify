@@ -14,6 +14,7 @@ warpify-proto.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+zellij-utils.workspace = true
 
 [lints]
 workspace = true

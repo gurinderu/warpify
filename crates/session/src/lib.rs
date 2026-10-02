@@ -1,10 +1,70 @@
 //! The plugin's session logic, free of zellij types so it builds and tests on the host: the
 //! plugin converts what zellij reports into these snapshots and asks them what to answer.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use warpify_proto::{base_tab_name, Client, ClientId, Request, State, Tab, TabId, Target};
+use warpify_proto::{
+    base_tab_name, Client, ClientId, Request, State, Tab, TabId, Target, CONFIG_FALSE,
+    CONFIG_ON_CONNECT, CONFIG_PIN, CONFIG_TRUE, ON_CONNECT_NEW_TAB, ON_CONNECT_NONE,
+};
+
+/// What the plugin does for a client that has just connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnConnect {
+    /// Nothing: the client stays wherever zellij put it.
+    #[default]
+    None,
+    /// Give the client a tab of its own (the first client of a session keeps its tab).
+    NewTab,
+}
+
+/// The plugin's `load_plugins` configuration (graph @nick/warpify, node #16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Config {
+    pub on_connect: OnConnect,
+    /// Pin the bind made on connect.
+    pub pin: bool,
+}
+
+impl Config {
+    /// Parses the string map zellij hands to `load`. An unknown value falls back to the default
+    /// and yields a warning; unknown keys are ignored.
+    #[must_use]
+    pub fn parse(map: &BTreeMap<String, String>) -> (Self, Vec<String>) {
+        let mut config = Self::default();
+        let mut warnings = Vec::new();
+        let mut warn = |key: &str, value: &str, default: &str| {
+            warnings.push(format!(
+                "unknown value {value:?} for {key}, using {default:?}"
+            ));
+        };
+        if let Some(value) = map.get(CONFIG_ON_CONNECT) {
+            match value.as_str() {
+                ON_CONNECT_NEW_TAB => config.on_connect = OnConnect::NewTab,
+                ON_CONNECT_NONE => {}
+                _ => warn(CONFIG_ON_CONNECT, value, ON_CONNECT_NONE),
+            }
+        }
+        if let Some(value) = map.get(CONFIG_PIN) {
+            match value.as_str() {
+                CONFIG_TRUE => config.pin = true,
+                CONFIG_FALSE => {}
+                _ => warn(CONFIG_PIN, value, CONFIG_FALSE),
+            }
+        }
+        (config, warnings)
+    }
+}
+
+/// What to do for a newly served client (see [`Snapshot::on_connect`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectAction {
+    /// Bound to the tab it is on, already recorded in the snapshot: nothing to execute.
+    BoundCurrent(TabId),
+    /// Create a new tab for it: bind to `Target::New(None)` with this pin.
+    NewTab { pin: bool },
+}
 
 /// A tab as one plugin instance sees it in its own `TabUpdate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +102,9 @@ pub struct Snapshot {
     /// client whose focused pane isn't in the layout dump (e.g. in the scrollback editor):
     /// accepted residual risk (graph @nick/warpify, node #11).
     pub zero_pending: bool,
+    /// `on_connect` has been acted on for this client's lifetime; `freeze` clears it, so the
+    /// next client to take the id is served again (graph @nick/warpify, node #16).
+    pub connect_served: bool,
 }
 
 impl Default for Snapshot {
@@ -53,6 +116,7 @@ impl Default for Snapshot {
             pending: None,
             connected: true,
             zero_pending: false,
+            connect_served: false,
         }
     }
 }
@@ -283,6 +347,7 @@ impl Snapshot {
     pub fn freeze(&mut self) {
         self.connected = false;
         self.zero_pending = false;
+        self.connect_served = false;
         self.binding = None;
         self.pending = None;
     }
@@ -297,6 +362,36 @@ impl Snapshot {
         if let Some(tab) = self.pending.as_ref().and_then(|p| p.resolve(&self.tabs)) {
             let pin = self.pending.take().is_some_and(|p| p.pin);
             self.binding = Some(Binding::new(tab, pin));
+        }
+    }
+
+    /// Serve a newly connected client, once per client lifetime: call after [`Self::apply_tabs`],
+    /// which the first tab update after `load` and the one that un-freezes the instance both
+    /// are. With `on_connect = new_tab`: a client that is alone in the session binds to the tab
+    /// it is on (the binding is recorded here); with others around it gets a new tab. `None`
+    /// when there is nothing to do or the update can't be trusted yet (tried again next update):
+    /// the client isn't on a tab, or a tab lists the own client among the *other* ones. zellij
+    /// replays to a freshly loaded instance the updates it cached while loading, and those are
+    /// the first client's, so the first update a new instance sees can be another client's view
+    /// (observed live in zellij 0.45.1; graph @nick/warpify, node #16).
+    pub fn on_connect(&mut self, config: &Config) -> Option<ConnectAction> {
+        if config.on_connect == OnConnect::None || self.connect_served {
+            return None;
+        }
+        if self
+            .tabs
+            .iter()
+            .any(|t| t.other_clients.contains(&self.own_client))
+        {
+            return None;
+        }
+        let tab = self.tabs.iter().find(|t| t.active)?.id;
+        self.connect_served = true;
+        if self.client_ids().len() == 1 {
+            self.binding = Some(Binding::new(tab, config.pin).seen_in(&self.tabs));
+            Some(ConnectAction::BoundCurrent(tab))
+        } else {
+            Some(ConnectAction::NewTab { pin: config.pin })
         }
     }
 
@@ -848,5 +943,148 @@ mod tests {
         assert_eq!(msg.encode(), r#"{"msg":"forget","client":5}"#);
         assert_eq!(Internal::decode(&msg.encode()).unwrap(), msg);
         assert!(Internal::decode("{}").is_err());
+    }
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn config_defaults_to_nothing() {
+        assert_eq!(Config::parse(&BTreeMap::new()), (Config::default(), vec![]));
+        assert_eq!(Config::default().on_connect, OnConnect::None);
+        assert!(!Config::default().pin);
+    }
+
+    #[test]
+    fn config_reads_both_keys() {
+        let (config, warnings) = Config::parse(&map(&[("on_connect", "new_tab"), ("pin", "true")]));
+        assert_eq!(
+            config,
+            Config {
+                on_connect: OnConnect::NewTab,
+                pin: true
+            }
+        );
+        assert!(warnings.is_empty());
+        let (config, warnings) = Config::parse(&map(&[("on_connect", "none"), ("pin", "false")]));
+        assert_eq!(config, Config::default());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn config_unknown_values_warn_and_default_and_unknown_keys_are_ignored() {
+        let (config, warnings) = Config::parse(&map(&[
+            ("on_connect", "new-tab"),
+            ("pin", "yes"),
+            ("other", "x"),
+        ]));
+        assert_eq!(config, Config::default());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("on_connect") && warnings[0].contains("new-tab"));
+        assert!(warnings[1].contains("pin"));
+    }
+
+    const NEW_TAB: Config = Config {
+        on_connect: OnConnect::NewTab,
+        pin: false,
+    };
+
+    #[test]
+    fn first_update_alone_binds_the_current_tab() {
+        let mut snap = with_clients(1, &[]);
+        let config = Config {
+            pin: true,
+            ..NEW_TAB
+        };
+        assert_eq!(
+            snap.on_connect(&config),
+            Some(ConnectAction::BoundCurrent(0))
+        );
+        assert_eq!(
+            snap.binding,
+            Some(Binding {
+                tab: 0,
+                pin: true,
+                seen: true
+            })
+        );
+    }
+
+    #[test]
+    fn first_update_with_others_asks_for_a_new_tab() {
+        let mut snap = with_clients(2, &[1]);
+        let config = Config {
+            pin: true,
+            ..NEW_TAB
+        };
+        assert_eq!(
+            snap.on_connect(&config),
+            Some(ConnectAction::NewTab { pin: true })
+        );
+        assert_eq!(snap.binding, None);
+    }
+
+    #[test]
+    fn later_updates_do_nothing() {
+        for mut snap in [with_clients(1, &[]), with_clients(2, &[1])] {
+            assert!(snap.on_connect(&NEW_TAB).is_some());
+            assert_eq!(snap.on_connect(&NEW_TAB), None);
+        }
+    }
+
+    #[test]
+    fn unfreezing_serves_the_next_client_again() {
+        let mut snap = with_clients(2, &[1]);
+        assert!(snap.on_connect(&NEW_TAB).is_some());
+        snap.freeze();
+        snap.apply_tabs(vec![tab(0, 0, true, &[])]);
+        assert_eq!(
+            snap.on_connect(&NEW_TAB),
+            Some(ConnectAction::BoundCurrent(0))
+        );
+    }
+
+    #[test]
+    fn on_connect_none_does_nothing() {
+        let mut snap = with_clients(1, &[]);
+        assert_eq!(snap.on_connect(&Config::default()), None);
+        assert_eq!(snap.binding, None);
+    }
+
+    #[test]
+    fn an_update_that_is_another_clients_view_is_skipped() {
+        // Client 2's instance first sees a replay of client 1's update: client 2 shows up as
+        // "another" client and client 1 is missing.
+        let mut snap = Snapshot {
+            own_client: 2,
+            tabs: vec![tab(0, 0, true, &[2])],
+            ..Snapshot::default()
+        };
+        assert_eq!(snap.on_connect(&NEW_TAB), None);
+        assert!(!snap.connect_served);
+        snap.apply_tabs(vec![tab(0, 0, true, &[1])]);
+        assert_eq!(
+            snap.on_connect(&NEW_TAB),
+            Some(ConnectAction::NewTab { pin: false })
+        );
+    }
+
+    #[test]
+    fn a_client_not_on_any_tab_yet_waits_for_the_next_update() {
+        let mut snap = Snapshot {
+            own_client: 1,
+            tabs: vec![tab(0, 0, false, &[2])],
+            ..Snapshot::default()
+        };
+        assert_eq!(snap.on_connect(&NEW_TAB), None);
+        snap.apply_tabs(vec![tab(0, 0, true, &[2])]);
+        assert_eq!(
+            snap.on_connect(&NEW_TAB),
+            Some(ConnectAction::NewTab { pin: false })
+        );
     }
 }

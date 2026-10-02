@@ -3,6 +3,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use warpify_proto::{CONFIG_ON_CONNECT, CONFIG_PIN, CONFIG_TRUE, ON_CONNECT_NEW_TAB};
+
 use crate::config::lists_entry;
 use crate::{Error, Paths, Result};
 
@@ -58,6 +60,52 @@ pub enum ConfigAccess {
     },
 }
 
+/// The plugin settings written as children of our `load_plugins` entry (the plugin parses them
+/// in `warpify_session::Config`); the defaults write no children (graph @nick/warpify, node #16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PluginOptions {
+    /// `on_connect "new_tab"`.
+    pub new_tab_on_connect: bool,
+    /// `pin "true"`.
+    pub pin: bool,
+}
+
+impl PluginOptions {
+    /// The children keys this struct owns in an entry.
+    pub(crate) const KEYS: &'static [&'static str] = &[CONFIG_ON_CONNECT, CONFIG_PIN];
+
+    /// The `key "value"` children to write.
+    pub(crate) fn pairs(self) -> Vec<(&'static str, &'static str)> {
+        let mut pairs = Vec::new();
+        if self.new_tab_on_connect {
+            pairs.push((CONFIG_ON_CONNECT, ON_CONNECT_NEW_TAB));
+        }
+        if self.pin {
+            pairs.push((CONFIG_PIN, CONFIG_TRUE));
+        }
+        pairs
+    }
+
+    /// The children as KDL on one line: `on_connect "new_tab"; pin "true";`.
+    pub(crate) fn children_text(self) -> String {
+        let kids: Vec<String> = self
+            .pairs()
+            .iter()
+            .map(|(k, v)| format!("{k} \"{v}\";"))
+            .collect();
+        kids.join(" ")
+    }
+
+    /// The entry as one line of KDL, children included: `"file:/w" { on_connect "new_tab"; }`.
+    pub(crate) fn snippet(self, entry: &str) -> String {
+        if self.pairs().is_empty() {
+            format!("\"{entry}\"")
+        } else {
+            format!("\"{entry}\" {{ {} }}", self.children_text())
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     FetchWasm {
@@ -76,6 +124,7 @@ pub enum Action {
     AddLoadPlugin {
         file: PathBuf,
         entry: String,
+        options: PluginOptions,
     },
     RemoveWasm {
         dest: PathBuf,
@@ -93,6 +142,7 @@ pub enum Action {
     Manual {
         file: PathBuf,
         entry: String,
+        options: PluginOptions,
         why: String,
         adding: bool,
         seen: Seen,
@@ -111,8 +161,21 @@ impl fmt::Display for Action {
             Self::MergePermissions { file, .. } => {
                 write!(f, "grant the plugin its permissions in {}", file.display())
             }
-            Self::AddLoadPlugin { file, entry } => {
-                write!(f, "add \"{entry}\" to load_plugins in {}", file.display())
+            Self::AddLoadPlugin {
+                file,
+                entry,
+                options,
+            } => {
+                let with = if options.pairs().is_empty() {
+                    String::new()
+                } else {
+                    format!(" with {}", options.children_text())
+                };
+                write!(
+                    f,
+                    "add \"{entry}\"{with} to load_plugins in {}",
+                    file.display()
+                )
             }
             Self::RemoveWasm { dest } => write!(f, "remove {}", dest.display()),
             Self::RemovePermissions { file, .. } => {
@@ -152,12 +215,18 @@ pub fn load_entry(wasm: &Path) -> Result<String> {
         .ok_or_else(|| Error::new("the plugin path is not valid UTF-8"))
 }
 
-fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<Action> {
+fn config_action(
+    paths: &Paths,
+    access: &ConfigAccess,
+    options: PluginOptions,
+    adding: bool,
+) -> Result<Action> {
     let entry = load_entry(&paths.wasm)?;
     Ok(match access {
         ConfigAccess::Editable if adding => Action::AddLoadPlugin {
             file: paths.config.clone(),
             entry,
+            options,
         },
         ConfigAccess::Editable => Action::RemoveLoadPlugin {
             file: paths.config.clone(),
@@ -166,6 +235,7 @@ fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<A
         ConfigAccess::Manual { why, seen } => Action::Manual {
             file: paths.config.clone(),
             entry,
+            options,
             why: why.clone(),
             adding,
             seen: seen.clone(),
@@ -175,7 +245,12 @@ fn config_action(paths: &Paths, access: &ConfigAccess, adding: bool) -> Result<A
 
 /// # Errors
 /// When the plugin path is not valid UTF-8.
-pub fn plan_install(paths: &Paths, source: &Source, access: &ConfigAccess) -> Result<Plan> {
+pub fn plan_install(
+    paths: &Paths,
+    source: &Source,
+    options: PluginOptions,
+    access: &ConfigAccess,
+) -> Result<Plan> {
     let wasm = match source {
         Source::Release { version } => Action::FetchWasm {
             url: release_url(version, PLUGIN_FILE),
@@ -194,7 +269,7 @@ pub fn plan_install(paths: &Paths, source: &Source, access: &ConfigAccess) -> Re
                 file: paths.permissions.clone(),
                 wasm: paths.wasm.clone(),
             },
-            config_action(paths, access, true)?,
+            config_action(paths, access, options, true)?,
         ],
     })
 }
@@ -209,8 +284,24 @@ pub fn plan_uninstall(paths: &Paths, access: &ConfigAccess) -> Result<Plan> {
     let entry = load_entry(&paths.wasm)?;
     let (config, keep_wasm) = match access {
         ConfigAccess::Manual { seen, .. } if !entry_may_be_in(seen, &entry) => (None, false),
-        ConfigAccess::Manual { .. } => (Some(config_action(paths, access, false)?), true),
-        ConfigAccess::Editable => (Some(config_action(paths, access, false)?), false),
+        ConfigAccess::Manual { .. } => (
+            Some(config_action(
+                paths,
+                access,
+                PluginOptions::default(),
+                false,
+            )?),
+            true,
+        ),
+        ConfigAccess::Editable => (
+            Some(config_action(
+                paths,
+                access,
+                PluginOptions::default(),
+                false,
+            )?),
+            false,
+        ),
     };
     let mut actions: Vec<Action> = config.into_iter().collect();
     actions.push(Action::RemovePermissions {
@@ -301,12 +392,24 @@ mod tests {
         let rel = Source::Release {
             version: "0.1.0".into(),
         };
-        let plan = plan_install(&paths(), &rel, &ConfigAccess::Editable).unwrap();
+        let plan = plan_install(
+            &paths(),
+            &rel,
+            PluginOptions::default(),
+            &ConfigAccess::Editable,
+        )
+        .unwrap();
         assert!(matches!(plan.actions[0], Action::FetchWasm { .. }));
         assert!(matches!(plan.actions[1], Action::MergePermissions { .. }));
         assert!(matches!(plan.actions[2], Action::AddLoadPlugin { .. }));
         let local = Source::Local("/w.wasm".into());
-        let plan = plan_install(&paths(), &local, &ConfigAccess::Editable).unwrap();
+        let plan = plan_install(
+            &paths(),
+            &local,
+            PluginOptions::default(),
+            &ConfigAccess::Editable,
+        )
+        .unwrap();
         assert!(matches!(plan.actions[0], Action::CopyWasm { .. }));
     }
 
@@ -315,6 +418,7 @@ mod tests {
         let plan = plan_install(
             &paths(),
             &Source::Local("/w.wasm".into()),
+            PluginOptions::default(),
             &ConfigAccess::Manual {
                 why: "nix".into(),
                 seen: Seen::Missing,
@@ -326,6 +430,7 @@ mod tests {
             Action::Manual {
                 file: "/c/config.kdl".into(),
                 entry: "file:/d/warpify/warpify-zellij.wasm".into(),
+                options: PluginOptions::default(),
                 why: "nix".into(),
                 adding: true,
                 seen: Seen::Missing,
@@ -346,7 +451,13 @@ mod tests {
         let rel = Source::Release {
             version: "1.2.3".into(),
         };
-        let plan = plan_install(&paths(), &rel, &ConfigAccess::Editable).unwrap();
+        let plan = plan_install(
+            &paths(),
+            &rel,
+            PluginOptions::default(),
+            &ConfigAccess::Editable,
+        )
+        .unwrap();
         let Action::FetchWasm { url, sha_url, dest } = &plan.actions[0] else {
             panic!("{plan:?}")
         };

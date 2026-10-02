@@ -12,10 +12,7 @@ use warpify_proto::{ClientId, Event, Request, State, HEARTBEAT_SECS, PIPE_NAME};
 
 mod bind;
 
-pub use bind::{
-    attach_log_path, attach_session, bind_and_confirm, check_outside_zellij, confirmed,
-    parse_known, pick_new, wait_for_new_client, DEFAULT_SESSION,
-};
+pub use bind::{bind_and_confirm, confirmed};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
@@ -31,14 +28,8 @@ pub enum Error {
     Exit(String),
     /// No session was named and the process isn't running inside one.
     NoSession,
-    /// `attach` was run from a pane of a zellij session.
-    InsideSession(String),
-    /// A `--known` list wasn't comma-separated client ids.
-    BadKnown(String),
     /// The bind went out but the client never reached its target.
     NotMoved(ClientId),
-    /// No new client connected in time.
-    NoNewClient,
 }
 
 impl fmt::Display for Error {
@@ -56,16 +47,10 @@ impl fmt::Display for Error {
             Error::NoSession => f.write_str(
                 "not inside a zellij session — run from a pane of the session or pass --session <name>",
             ),
-            Error::InsideSession(name) => write!(
-                f,
-                "already inside zellij session \"{name}\" — use bind instead"
-            ),
-            Error::BadKnown(item) => write!(f, "bad client id {item:?} in --known"),
             Error::NotMoved(client) => write!(
                 f,
                 "bind sent but client {client} didn't move — is it connected?"
             ),
-            Error::NoNewClient => f.write_str("no new client connected to the session in time"),
         }
     }
 }

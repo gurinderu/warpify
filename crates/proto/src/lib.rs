@@ -20,6 +20,17 @@ pub const PERMISSIONS: &[&str] = &[
     "MessageAndLaunchOtherPlugins",
 ];
 
+/// Plugin configuration keys and values: the children of the plugin's `load_plugins` entry,
+/// which zellij hands to `load` as a string map (zellij-utils `kdl_layout_parser.rs`
+/// `parse_plugin_user_configuration`). The plugin parses them, the installer and the
+/// home-manager module write them (graph @nick/warpify, node #16).
+pub const CONFIG_ON_CONNECT: &str = "on_connect";
+pub const CONFIG_PIN: &str = "pin";
+pub const ON_CONNECT_NEW_TAB: &str = "new_tab";
+pub const ON_CONNECT_NONE: &str = "none";
+pub const CONFIG_TRUE: &str = "true";
+pub const CONFIG_FALSE: &str = "false";
+
 /// Seconds between heartbeats on a `watch` stream.
 pub const HEARTBEAT_SECS: f64 = 5.0;
 

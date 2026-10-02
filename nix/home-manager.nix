@@ -18,8 +18,12 @@ let
       (builtins.fromTOML (builtins.readFile ./../Cargo.lock)).package).version;
   builtFor = lib.concatStringsSep "." (lib.take 2 (lib.splitString "." tileVersion));
   # lib.hm.generators.toKDL writes attribute names verbatim: pre-quote them to get
-  # `"file:/…" ` child nodes with no arguments.
-  node = name: { "\"${name}\"" = { }; };
+  # `"file:/…" ` child nodes; `children` become the plugin's configuration (graph @nick/warpify,
+  # node #16: the plugin reads `on_connect` and `pin` in `load`).
+  node = name: children: { "\"${name}\"" = children; };
+  pluginConfig =
+    lib.optionalAttrs (cfg.onConnect == "new-tab") { on_connect = "new_tab"; }
+    // lib.optionalAttrs cfg.pin { pin = "true"; };
 in
 {
   options.programs.warpify = {
@@ -35,6 +39,19 @@ in
       default = self.packages.${system}.warpify-zellij;
       defaultText = lib.literalExpression "warpify.packages.\${system}.warpify-zellij";
       description = "The zellij plugin; its `lib/warpify-zellij.wasm` is linked into the data directory.";
+    };
+    onConnect = lib.mkOption {
+      type = lib.types.enum [ "none" "new-tab" ];
+      default = "none";
+      description = ''
+        What the plugin does for a client that connects: `new-tab` leaves the first client of a
+        session on its tab and gives every later client a new tab of its own; `none` does nothing.
+      '';
+    };
+    pin = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Keep a client bound on connect on its tab (needs `onConnect = \"new-tab\"`).";
     };
   };
 
@@ -57,10 +74,12 @@ in
       ++ lib.optional
         (config.programs.zellij.enable
           && !(lib.hasPrefix "${builtFor}." config.programs.zellij.package.version))
-        "warpify's zellij plugin is built for zellij ${builtFor}; programs.zellij.package is ${config.programs.zellij.package.version} — the plugin may not load";
+        "warpify's zellij plugin is built for zellij ${builtFor}; programs.zellij.package is ${config.programs.zellij.package.version} — the plugin may not load"
+      ++ lib.optional (cfg.pin && cfg.onConnect == "none")
+        "programs.warpify.pin has no effect with programs.warpify.onConnect = \"none\"";
 
     # load_plugins replaces zellij's defaults, so zellij:link is repeated here.
-    programs.zellij.settings.load_plugins = node "zellij:link" // node "file:${wasm}";
+    programs.zellij.settings.load_plugins = node "zellij:link" { } // node "file:${wasm}" pluginConfig;
 
     home.activation.warpifyGrantPermissions = lib.mkIf config.programs.zellij.enable (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       # Never break `home-manager switch` over this: zellij asks on first load instead.

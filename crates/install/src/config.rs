@@ -4,8 +4,8 @@ use std::path::Path;
 
 use kdl::{KdlDocument, KdlNode};
 
-use crate::kdl_edit::{add_child, append_node, has_child, parse, remove_child};
-use crate::plan::Seen;
+use crate::kdl_edit::{add_child, append_node, has_child, parse, remove_child, set_options};
+use crate::plan::{PluginOptions, Seen};
 use crate::Result;
 
 const BLOCK: &str = "load_plugins";
@@ -58,10 +58,11 @@ pub(crate) fn manual_advice(
     file: &Path,
     seen: &Seen,
     entry: &str,
+    options: PluginOptions,
     adding: bool,
     why: &str,
 ) -> String {
-    let line = format!("\"{entry}\"");
+    let line = options.snippet(entry);
     let tail = format!("(it's managed outside warpify: {why})");
     let again = "then run `warpify uninstall zellij` again to delete the plugin file";
     if !adding {
@@ -74,7 +75,10 @@ pub(crate) fn manual_advice(
         };
     }
     let full_block = |note: &str| {
-        let block = edit_install("", entry).ok().flatten().unwrap_or_default();
+        let block = edit_install("", entry, options)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         format!(
             "{}\nadd this block to your zellij config (load_plugins replaces zellij's defaults, so they are in it) {note}",
             block.trim_end()
@@ -106,21 +110,27 @@ pub(crate) fn manual_advice(
     }
 }
 
-/// Adds `entry` (e.g. `file:/abs/warpify-zellij.wasm`) to `load_plugins`. A block that exists only gets
-/// our child; when there is none it is created at the end with zellij's default entries too: new text, `None` when the entry is already there.
+/// Adds `entry` (e.g. `file:/abs/warpify-zellij.wasm`) to `load_plugins` with `options` as its
+/// children, or brings an existing entry's options in line with `options`. A block that exists
+/// only gets our child; when there is none it is created at the end with zellij's default entries
+/// too: new text, `None` when the entry is already there as wanted.
 ///
 /// # Errors
 /// When `text` is not valid KDL.
-pub fn edit_install(text: &str, entry: &str) -> Result<Option<String>> {
+pub fn edit_install(text: &str, entry: &str, options: PluginOptions) -> Result<Option<String>> {
     let mut doc = parse(text, WHAT)?;
+    let pairs = options.pairs();
+    let owned = PluginOptions::KEYS;
     if let Some(block) = doc.get_mut(BLOCK) {
         if has_child(block, entry) {
-            return Ok(None);
+            return Ok(set_options(block, entry, owned, &pairs).then(|| doc.to_string()));
         }
         add_child(block, entry);
+        set_options(block, entry, owned, &pairs);
     } else {
         let mut block = defaults_block();
         add_child(&mut block, entry);
+        set_options(&mut block, entry, owned, &pairs);
         append_node(&mut doc, block);
     }
     Ok(Some(doc.to_string()))
@@ -187,11 +197,15 @@ mod tests {
     use super::*;
 
     const E: &str = "file:/d/warpify/warpify-zellij.wasm";
+    const NONE: PluginOptions = PluginOptions {
+        new_tab_on_connect: false,
+        pin: false,
+    };
     const NEW_BLOCK: &str = "load_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\n";
     #[test]
     fn appends_a_block_when_there_is_none_and_keeps_the_rest() {
         let base = "// my config\nkeybinds {\n    normal {\n        bind \"Alt h\" { MoveFocus \"Left\"; }  // left\n    }\n}\n\ntheme   \"nord\" /* c */\n// tail\n";
-        let out = edit_install(base, E).unwrap().unwrap();
+        let out = edit_install(base, E, NONE).unwrap().unwrap();
         assert!(out.starts_with(base.trim_end_matches("// tail\n")), "{out}");
         assert!(
             out.contains("// tail\n\nload_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\n"),
@@ -202,7 +216,7 @@ mod tests {
     #[test]
     fn adds_a_child_to_an_existing_block() {
         let base = "a 1\nload_plugins {\n    // mine\n    \"file:/x.wasm\"\n}\nb 2\n";
-        let out = edit_install(base, E).unwrap().unwrap();
+        let out = edit_install(base, E, NONE).unwrap().unwrap();
         assert_eq!(
             out,
             "a 1\nload_plugins {\n    // mine\n    \"file:/x.wasm\"\n    \"file:/d/warpify/warpify-zellij.wasm\"\n}\nb 2\n"
@@ -216,35 +230,35 @@ mod tests {
             "load_plugins\n",
             "load_plugins { \"file:/x.wasm\"; }\n",
         ] {
-            let out = edit_install(base, E)
+            let out = edit_install(base, E, NONE)
                 .unwrap_or_else(|e| panic!("{base:?}: {e}"))
                 .unwrap();
             assert!(
                 out.contains("\"file:/d/warpify/warpify-zellij.wasm\""),
                 "{out}"
             );
-            assert!(edit_install(&out, E).unwrap().is_none(), "{out}");
+            assert!(edit_install(&out, E, NONE).unwrap().is_none(), "{out}");
             assert!(out.parse::<kdl::KdlDocument>().is_ok());
         }
     }
 
     #[test]
     fn already_present_is_unchanged_and_second_run_is_a_no_op() {
-        let once = edit_install("", E).unwrap().unwrap();
+        let once = edit_install("", E, NONE).unwrap().unwrap();
         assert_eq!(once, NEW_BLOCK);
-        assert!(edit_install(&once, E).unwrap().is_none());
+        assert!(edit_install(&once, E, NONE).unwrap().is_none());
     }
 
     #[test]
     fn file_without_trailing_newline_is_extended_cleanly() {
-        let out = edit_install("a 1", E).unwrap().unwrap();
+        let out = edit_install("a 1", E, NONE).unwrap().unwrap();
         assert_eq!(out, format!("a 1\n\n{NEW_BLOCK}"));
     }
 
     #[test]
     fn uninstall_reverses_install() {
         let base = "// c\na 1\n";
-        let installed = edit_install(base, E).unwrap().unwrap();
+        let installed = edit_install(base, E, NONE).unwrap().unwrap();
         let removed = edit_uninstall(&installed, E).unwrap().unwrap();
         assert_eq!(removed.trim_end(), base.trim_end());
         assert!(edit_uninstall(&removed, E).unwrap().is_none());
@@ -260,7 +274,7 @@ mod tests {
             "// only a comment\n",
             "a 1\n// tail\n",
         ] {
-            let installed = edit_install(base, E).unwrap().unwrap();
+            let installed = edit_install(base, E, NONE).unwrap().unwrap();
             let removed = edit_uninstall(&installed, E).unwrap().unwrap();
             assert_eq!(removed, base, "{removed:?}");
         }
@@ -270,14 +284,14 @@ mod tests {
     fn uninstall_adds_the_missing_final_newline() {
         // KDL needs the last line terminated, so install added a newline and uninstall can't
         // tell it from one the user wrote (a blank line before a block is theirs to keep).
-        let installed = edit_install("a 1", E).unwrap().unwrap();
+        let installed = edit_install("a 1", E, NONE).unwrap().unwrap();
         assert_eq!(edit_uninstall(&installed, E).unwrap().unwrap(), "a 1\n");
     }
 
     #[test]
     fn existing_block_gets_only_our_child_and_keeps_a_user_block_on_uninstall() {
         let mine = "load_plugins {\n    \"zellij:link\"\n}\n";
-        let out = edit_install(mine, E).unwrap().unwrap();
+        let out = edit_install(mine, E, NONE).unwrap().unwrap();
         assert!(!out.contains(DEFAULTS_NOTE), "{out}");
         assert_eq!(edit_uninstall(&out, E).unwrap().unwrap(), mine);
     }
@@ -292,11 +306,11 @@ mod tests {
 
     #[test]
     fn marker_rules_decide_what_uninstall_may_delete() {
-        let created = mark_created(&edit_install("", E).unwrap().unwrap());
+        let created = mark_created(&edit_install("", E, NONE).unwrap().unwrap());
         let after = edit_uninstall(&created, E).unwrap().unwrap();
         assert!(only_ours_left(&created, &after), "{after:?}");
         // no marker: the user's file, however empty it ends up
-        let theirs = edit_install("", E).unwrap().unwrap();
+        let theirs = edit_install("", E, NONE).unwrap().unwrap();
         assert!(!only_ours_left(&theirs, ""));
         // marker, but something else is in the file
         let mixed = format!("{created}theme \"x\"\n");
@@ -315,7 +329,7 @@ mod tests {
     fn manual_advice_follows_the_config() {
         let f = Path::new("/c/config.kdl");
         let text = |t: &str| Seen::Text(t.to_owned());
-        let add = |s: &Seen| manual_advice(f, s, E, true, "nix");
+        let add = |s: &Seen| manual_advice(f, s, E, NONE, true, "nix");
         let line = format!("\"{E}\"");
         let with_block = add(&text("load_plugins {\n    \"zellij:link\"\n}\n"));
         assert!(
@@ -337,7 +351,7 @@ mod tests {
             broken.starts_with(&line) && broken.contains("not valid KDL"),
             "{broken}"
         );
-        let rm = manual_advice(f, &text(NEW_BLOCK), E, false, "nix");
+        let rm = manual_advice(f, &text(NEW_BLOCK), E, NONE, false, "nix");
         assert_eq!(
             rm,
             format!("remove this line from your load_plugins block: {line}, then run `warpify uninstall zellij` again to delete the plugin file (it's managed outside warpify: nix)")
@@ -349,7 +363,7 @@ mod tests {
     fn unreadable_config_gets_the_full_block_and_the_reason() {
         let f = Path::new("/c/config.kdl");
         let seen = Seen::Unreadable("Permission denied".into());
-        let add = manual_advice(f, &seen, E, true, "it is read-only");
+        let add = manual_advice(f, &seen, E, NONE, true, "it is read-only");
         assert!(add.starts_with(NEW_BLOCK.trim_end()), "{add}");
         assert!(
             add.ends_with(
@@ -357,7 +371,7 @@ mod tests {
             ),
             "{add}"
         );
-        let rm = manual_advice(f, &seen, E, false, "it is read-only");
+        let rm = manual_advice(f, &seen, E, NONE, false, "it is read-only");
         assert!(
             rm.starts_with(
                 "if \"file:/d/warpify/warpify-zellij.wasm\" is in your load_plugins block"
@@ -376,6 +390,108 @@ mod tests {
 
     #[test]
     fn unparsable_config_is_refused() {
-        assert!(edit_install("load_plugins {", E).is_err());
+        assert!(edit_install("load_plugins {", E, NONE).is_err());
+    }
+
+    const BOTH: PluginOptions = PluginOptions {
+        new_tab_on_connect: true,
+        pin: true,
+    };
+    const NEW_TAB_ONLY: PluginOptions = PluginOptions {
+        new_tab_on_connect: true,
+        pin: false,
+    };
+
+    #[test]
+    fn options_become_children_of_our_entry_and_zellij_reads_them() {
+        let out = edit_install("", E, BOTH).unwrap().unwrap();
+        assert_eq!(
+            out,
+            "load_plugins {\n    // zellij defaults kept: load_plugins replaces them\n    \"zellij:link\"\n    \"file:/d/warpify/warpify-zellij.wasm\" {\n        on_connect \"new_tab\"\n        pin \"true\"\n    }\n}\n"
+        );
+        // zellij's own config parser sees them in the plugin configuration map
+        let config = zellij_utils::input::config::Config::from_kdl(&out, None).unwrap();
+        let ours = config
+            .background_plugins
+            .iter()
+            .find_map(|p| match p {
+                zellij_utils::input::layout::RunPluginOrAlias::RunPlugin(run) => run
+                    .location
+                    .to_string()
+                    .contains("warpify")
+                    .then(|| run.configuration.clone()),
+                zellij_utils::input::layout::RunPluginOrAlias::Alias(_) => None,
+            })
+            .expect("our plugin is loaded");
+        assert_eq!(
+            ours.inner().get("on_connect").map(String::as_str),
+            Some("new_tab")
+        );
+        assert_eq!(ours.inner().get("pin").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn reinstall_is_idempotent_and_updates_the_options() {
+        let first = edit_install("a 1\n", E, NEW_TAB_ONLY).unwrap().unwrap();
+        assert!(first.contains("on_connect \"new_tab\""), "{first}");
+        assert!(!first.contains("pin"), "{first}");
+        assert!(edit_install(&first, E, NEW_TAB_ONLY).unwrap().is_none());
+        let both = edit_install(&first, E, BOTH).unwrap().unwrap();
+        assert!(both.contains("pin \"true\""), "{both}");
+        assert!(edit_install(&both, E, BOTH).unwrap().is_none());
+        let back = edit_install(&both, E, NONE).unwrap().unwrap();
+        assert!(
+            !back.contains("on_connect") && !back.contains("pin"),
+            "{back}"
+        );
+        assert!(back.contains(E), "{back}");
+        assert!(edit_install(&back, E, NONE).unwrap().is_none());
+    }
+
+    #[test]
+    fn options_are_added_to_an_entry_already_in_a_block_and_other_children_stay() {
+        let base = format!("load_plugins {{\n    \"{E}\" {{\n        cwd \"/x\"\n    }}\n}}\n");
+        let out = edit_install(&base, E, BOTH).unwrap().unwrap();
+        assert!(out.contains("cwd \"/x\""), "{out}");
+        assert!(out.contains("on_connect \"new_tab\""), "{out}");
+        assert!(out.parse::<kdl::KdlDocument>().is_ok(), "{out}");
+        let plain = format!("load_plugins {{\n    \"{E}\"\n    \"file:/y.wasm\"\n}}\n");
+        let out = edit_install(&plain, E, NEW_TAB_ONLY).unwrap().unwrap();
+        assert!(out.contains("\"file:/y.wasm\""), "{out}");
+        assert!(out.parse::<kdl::KdlDocument>().is_ok(), "{out}");
+    }
+
+    #[test]
+    fn uninstall_removes_the_entry_with_its_options() {
+        let installed = edit_install("a 1\n", E, BOTH).unwrap().unwrap();
+        let removed = edit_uninstall(&installed, E).unwrap().unwrap();
+        assert_eq!(removed, "a 1\n");
+    }
+
+    #[test]
+    fn manual_advice_shows_the_options() {
+        let out = manual_advice(
+            Path::new("/c/config.kdl"),
+            &Seen::Missing,
+            E,
+            BOTH,
+            true,
+            "nix",
+        );
+        assert!(out.contains("on_connect \"new_tab\""), "{out}");
+        let with_block = manual_advice(
+            Path::new("/c/config.kdl"),
+            &Seen::Text("load_plugins {\n    \"zellij:link\"\n}\n".into()),
+            E,
+            BOTH,
+            true,
+            "nix",
+        );
+        assert!(
+            with_block.starts_with(&format!(
+                "\"{E}\" {{ on_connect \"new_tab\"; pin \"true\"; }}\n"
+            )),
+            "{with_block}"
+        );
     }
 }
