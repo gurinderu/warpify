@@ -44,8 +44,8 @@ in
       type = lib.types.enum [ "none" "new-tab" ];
       default = "none";
       description = ''
-        What the plugin does for a client that connects: `new-tab` leaves the first client of a
-        session on its tab and gives every later client a new tab of its own; `none` does nothing.
+        What the plugin does for a client that connects: `new-tab` leaves a client that is alone
+        in the session when it connects on its tab and gives any other client a new tab of its own; `none` does nothing.
       '';
     };
     pin = lib.mkOption {

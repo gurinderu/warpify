@@ -21,7 +21,7 @@ enum Integration {
 enum OnConnect {
     /// leave the client where zellij put it
     None,
-    /// the first client keeps its tab, later ones get a new tab of their own
+    /// a client alone in the session when it connects stays on its tab, any other gets a new tab of its own
     NewTab,
 }
 

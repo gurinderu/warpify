@@ -15,7 +15,7 @@ pub enum OnConnect {
     /// Nothing: the client stays wherever zellij put it.
     #[default]
     None,
-    /// Give the client a tab of its own (the first client of a session keeps its tab).
+    /// Give the client a tab of its own (a client that is alone in the session when it connects stays on its tab; any other gets a new tab).
     NewTab,
 }
 

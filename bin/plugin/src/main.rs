@@ -60,9 +60,10 @@ impl ZellijPlugin for Warpify {
             // Reaches frozen instances too; reports 0 connected clients once the last client
             // has left (zellij-server `screen.rs` `remove_client`).
             EventType::SessionUpdate,
-            // Confirms a zero in `SessionUpdate`; the reply is addressed by (plugin, client) and
-            // reaches a departed client's instance (zellij-server `plugins/mod.rs`
-            // `ListClientsToPlugin`).
+            // Confirms a zero in `SessionUpdate`; zellij replays cached plugin events to every
+            // instance of the plugin when one loads, so a ListClients reply may reach an instance
+            // that didn't ask; the on-connect decision only uses the session-wide count, so that
+            // is harmless.
             EventType::ListClients,
             EventType::Timer,
             EventType::PermissionRequestResult,
