@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/gurinderu/warpify/compare/v0.1.0...v0.2.0) (2026-10-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* release assets and the installed plugin file are now `warpify-zellij.wasm` (+ `.sha256`) instead of `warpify.wasm`.
+
+### Features
+
+* name the zellij plugin artifact warpify-zellij.wasm ([#7](https://github.com/gurinderu/warpify/issues/7)) ([b46f460](https://github.com/gurinderu/warpify/commit/b46f46054a2f82e089a395496cbeef5bddb6e5d6))
+* nix packages and a home-manager module for warpify ([#9](https://github.com/gurinderu/warpify/issues/9)) ([e7f20c2](https://github.com/gurinderu/warpify/commit/e7f20c26bb4c6dd43179d4ce17863fdd2d516a90))
+
 ## 0.1.0 (2026-10-01)
 
 
