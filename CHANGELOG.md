@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/gurinderu/warpify/compare/v0.2.0...v0.3.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* `warpify attach` and its background helper are removed.
+
+### Features
+
+* the plugin binds a newly connected client itself ([#11](https://github.com/gurinderu/warpify/issues/11)) ([ead30ee](https://github.com/gurinderu/warpify/commit/ead30ee2408654f87164cde731c9753e973e2b9a))
+
 ## [0.2.0](https://github.com/gurinderu/warpify/compare/v0.1.0...v0.2.0) (2026-10-01)
 
 
